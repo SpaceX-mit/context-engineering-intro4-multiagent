@@ -17,7 +17,25 @@
       "Bash(python -m pytest:*)",
       "Bash(python3 -m pytest:*)",
       "WebFetch(domain:docs.anthropic.com)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(git clone *)",
+      "Bash(python3 -m py_compile core/models.py core/workflow.py tools/ast_analyzer.py tools/linter_tools.py tools/security_scanner.py tools/coverage_analyzer.py)",
+      "Bash(python3 *)",
+      "Bash(pip3 install *)",
+      "WebSearch",
+      "Bash(pip install *)",
+      "Bash(curl -s http://localhost:7860)",
+      "Bash(kill 48440)",
+      "Bash(pkill -f \"webui.app\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:7860)",
+      "Bash(pkill -f \"gradio\")",
+      "Bash(pkill -f simple_app)",
+      "Bash(pkill -f \"webui\")",
+      "Bash(git remote *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git branch *)",
+      "Bash(git push *)"
     ],
     "deny": []
   }
