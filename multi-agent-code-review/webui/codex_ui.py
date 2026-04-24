@@ -8,15 +8,141 @@ import sys
 import re
 import json
 import asyncio
+import threading
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, Response
 from flask_cors import CORS
+
+from core.context import WorkflowContext
+from core.orchestrator import WorkflowOrchestrator
+from agents.planner.agent import get_planner_agent
+from agents.coder.agent import get_coder_agent
+from agents.reviewer.agent import get_reviewer_agent
+from agents.linter.agent import get_linter_agent
+from agents.fixer.agent import get_fixer_agent
+from agents.test_agent.agent import get_tester_agent
 
 app = Flask(__name__, template_folder='.')
 CORS(app)
+
+
+# ============================================================================
+# Collaboration Events System
+# ============================================================================
+
+class CollaborationEvents:
+    """Manages collaboration events for display."""
+
+    def __init__(self):
+        self._events = []
+        self._lock = threading.Lock()
+        self._max_events = 100
+
+    def add(self, event_type: str, agent: str, role: str, message: str):
+        """Add a collaboration event."""
+        with self._lock:
+            event = {
+                "type": event_type,
+                "agent": agent,
+                "role": role,
+                "message": message,
+                "timestamp": datetime.now().isoformat(),
+            }
+            self._events.append(event)
+            if len(self._events) > self._max_events:
+                self._events = self._events[-self._max_events:]
+            return event
+
+    def get_all(self):
+        """Get all events."""
+        with self._lock:
+            return list(self._events)
+
+    def clear(self):
+        """Clear all events."""
+        with self._lock:
+            self._events.clear()
+
+
+events = CollaborationEvents()
+
+# ============================================================================
+# Workflow Orchestrator Setup
+# ============================================================================
+
+orch = WorkflowOrchestrator()
+
+async def setup_orchestrator_handlers():
+    """Set up workflow handlers with event emission."""
+
+    async def planner_handler(step_input, context):
+        events.add("running", "Sam", "planner", "Creating plan...")
+        requirement = step_input.data
+        if isinstance(requirement, dict):
+            requirement = requirement.get("requirement", str(requirement))
+        plan = get_planner_agent().plan(requirement)
+        events.add("completed", "Sam", "planner", f"Plan: {plan.overview[:50]}...")
+        return plan.overview
+
+    async def coder_handler(step_input, context):
+        events.add("running", "Codey", "coder", "Writing code...")
+        code = get_coder_agent().implement(context.requirement)
+        events.add("completed", "Codey", "coder", f"Generated {len(code.splitlines())} lines")
+        return code
+
+    async def linter_handler(step_input, context):
+        events.add("running", "Lint", "linter", "Checking style...")
+        code = step_input.data
+        if isinstance(code, dict):
+            code = code.get("code", str(code))
+        issues = get_linter_agent().lint(code)
+        events.add("completed", "Lint", "linter", f"Found {len(issues)} issues")
+        return issues
+
+    async def reviewer_handler(step_input, context):
+        events.add("running", "Robie", "reviewer", "Reviewing quality...")
+        code = step_input.data
+        if isinstance(code, dict):
+            code = code.get("code", str(code))
+        result = get_reviewer_agent().review(code)
+        events.add("completed", "Robie", "reviewer", f"Score: {result.score}/100")
+        return result.issues
+
+    async def fixer_handler(step_input, context):
+        events.add("running", "Fix", "fixer", "Applying fixes...")
+        data = step_input.data
+        if isinstance(data, dict):
+            code = data.get("code", "")
+            all_issues = data.get("issues", [])
+        else:
+            code = context.code or ""
+            all_issues = []
+        fixed = get_fixer_agent().fix(code, all_issues)
+        events.add("completed", "Fix", "fixer", f"Applied {len(all_issues)} fixes")
+        return fixed
+
+    async def tester_handler(step_input, context):
+        events.add("running", "Testy", "tester", "Generating tests...")
+        code = step_input.data
+        if isinstance(code, dict):
+            code = code.get("fixed_code", str(code))
+        tests = get_tester_agent().generate_tests(code)
+        events.add("completed", "Testy", "tester", "Tests generated")
+        return tests
+
+    orch.register_step_handler("planner", "plan", planner_handler)
+    orch.register_step_handler("coder", "implement", coder_handler)
+    orch.register_step_handler("linter", "lint", linter_handler)
+    orch.register_step_handler("reviewer", "review", reviewer_handler)
+    orch.register_step_handler("fixer", "fix", fixer_handler)
+    orch.register_step_handler("tester", "test", tester_handler)
+
+
+# Initialize handlers on module load
+asyncio.run(setup_orchestrator_handlers())
 
 HTML_TEMPLATE = r'''
 <!DOCTYPE html>
@@ -166,11 +292,58 @@ HTML_TEMPLATE = r'''
 
         /* Agent Pipeline Panel */
         .pipeline-panel {
-            width: 200px;
+            width: 180px;
             background: var(--bg-secondary);
             border-right: 1px solid var(--border);
             display: flex;
             flex-direction: column;
+        }
+
+        /* Collaboration Events Panel */
+        .events-panel {
+            width: 220px;
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .events-header {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+            font-size: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .events-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+        }
+
+        .event-item {
+            padding: 8px 10px;
+            border-radius: 6px;
+            margin-bottom: 6px;
+            font-size: 11px;
+            background: var(--bg-tertiary);
+            border-left: 3px solid var(--text-secondary);
+        }
+
+        .event-spawned { border-left-color: var(--accent-green); }
+        .event-closed { border-left-color: var(--accent-blue); }
+        .event-running { border-left-color: var(--accent-orange); }
+        .event-completed { border-left-color: var(--accent-green); }
+        .event-waiting { border-left-color: var(--text-secondary); }
+        .event-error { border-left-color: var(--accent-red); }
+
+        .event-time {
+            font-size: 9px;
+            color: var(--text-secondary);
+            margin-top: 4px;
         }
 
         .pipeline-header {
@@ -625,6 +798,19 @@ HTML_TEMPLATE = r'''
             </div>
         </div>
 
+        <!-- Collaboration Events Panel -->
+        <div class="events-panel">
+            <div class="events-header">
+                <span>✦ Events</span>
+                <button class="btn" onclick="clearEvents()">Clear</button>
+            </div>
+            <div class="events-content" id="events-container">
+                <div style="text-align: center; color: var(--text-secondary); padding: 20px 0; font-size: 11px;">
+                    No events yet
+                </div>
+            </div>
+        </div>
+
         <!-- Chat Area -->
         <div class="chat-area">
             <div class="chat-header">
@@ -686,6 +872,91 @@ HTML_TEMPLATE = r'''
 
     <script>
         let workflowSteps = [];
+        let eventSource = null;
+
+        // Connect to SSE for real-time events
+        function connectEventSource() {
+            if (eventSource) eventSource.close();
+            eventSource = new EventSource('/api/events/stream');
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                addEvent(data);
+                updatePipelineFromEvent(data);
+            };
+            eventSource.onerror = function() {
+                // Reconnect after 2 seconds
+                setTimeout(connectEventSource, 2000);
+            };
+        }
+
+        function addEvent(event) {
+            const container = document.getElementById('events-container');
+            if (!container) return;
+
+            // Remove placeholder if present
+            const placeholder = container.querySelector('div[style*="text-align"]');
+            if (placeholder) placeholder.remove();
+
+            const icons = {
+                'spawned': '✦',
+                'closed': '✓',
+                'running': '◐',
+                'completed': '✓',
+                'waiting': '⏳',
+                'error': '❌'
+            };
+
+            const time = new Date(event.timestamp).toLocaleTimeString();
+
+            const html = `
+                <div class="event-item event-${event.type}">
+                    ${icons[event.type] || '•'} <strong>${event.agent}</strong> [${event.role}]
+                    <br>${event.message}
+                    <div class="event-time">${time}</div>
+                </div>
+            `;
+
+            container.insertAdjacentHTML('afterbegin', html);
+
+            // Keep only last 30 events
+            const events = container.querySelectorAll('.event-item');
+            if (events.length > 30) {
+                events[events.length - 1].remove();
+            }
+        }
+
+        function updatePipelineFromEvent(event) {
+            const role = event.role;
+            const pipelineItem = document.querySelector(`.pipeline-step[data-agent="${role}"]`);
+
+            if (pipelineItem) {
+                if (event.type === 'running') {
+                    pipelineItem.classList.add('active');
+                    pipelineItem.style.opacity = '1';
+                } else if (event.type === 'completed' || event.type === 'closed') {
+                    pipelineItem.classList.remove('active');
+                    pipelineItem.style.opacity = '0.7';
+                }
+            }
+        }
+
+        function clearEvents() {
+            fetch('/api/events/clear', { method: 'POST' })
+                .then(() => {
+                    const container = document.getElementById('events-container');
+                    if (container) {
+                        container.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 20px 0; font-size: 11px;">No events yet</div>';
+                    }
+                    // Reset pipeline
+                    document.querySelectorAll('.pipeline-step').forEach(el => {
+                        el.classList.remove('active');
+                        el.style.opacity = '1';
+                    });
+                });
+        }
+
+        // Initialize SSE connection
+        connectEventSource();
 
         document.getElementById('chat-input').addEventListener('keypress', function(e) {
             if (e.key === 'Enter') sendMessage();
@@ -1266,5 +1537,109 @@ def agents_status():
     })
 
 
+# ============================================================================
+# New Orchestrator-based Workflow API
+# ============================================================================
+
+@app.route('/api/workflow', methods=['POST'])
+def run_workflow():
+    """Run workflow using orchestrator with event tracking."""
+    data = request.json
+    requirement = data.get('requirement', '')
+
+    if not requirement:
+        return jsonify({"error": "Requirement is required"}), 400
+
+    # Clear previous events
+    events.clear()
+
+    # Emit spawn events
+    events.add("spawned", "Alex", "coordinator", "Starting workflow")
+    events.add("spawned", "Sam", "planner", "Ready")
+    events.add("spawned", "Codey", "coder", "Ready")
+    events.add("spawned", "Lint", "linter", "Ready")
+    events.add("spawned", "Robie", "reviewer", "Ready")
+    events.add("spawned", "Fix", "fixer", "Ready")
+    events.add("spawned", "Testy", "tester", "Ready")
+
+    # Run workflow
+    ctx = WorkflowContext()
+    ctx.set_requirement(requirement)
+
+    workflows = orch.list_workflows()
+    dev_workflow = next(w for w in workflows if w.name == "DevelopmentWorkflow")
+
+    try:
+        result = asyncio.run(orch.execute_workflow(dev_workflow.id, ctx))
+
+        # Emit close events
+        events.add("closed", "Alex", "coordinator", "Completed")
+        events.add("closed", "Sam", "planner", "Completed")
+        events.add("closed", "Codey", "coder", "Completed")
+        events.add("closed", "Lint", "linter", "Completed")
+        events.add("closed", "Robie", "reviewer", "Completed")
+        events.add("closed", "Fix", "fixer", "Completed")
+        events.add("closed", "Testy", "tester", "Completed")
+
+        return jsonify({
+            "success": True,
+            "status": result.status.value,
+            "context": {
+                "plan": ctx.plan,
+                "code": ctx.code,
+                "lint_issues": len(ctx.lint_issues),
+                "review_issues": len(ctx.review_issues),
+                "fixed_code": ctx.fixed_code,
+                "tests": ctx.tests,
+            },
+            "stats": {
+                "steps_completed": result.steps_completed,
+                "duration": result.duration_seconds,
+            }
+        })
+
+    except Exception as e:
+        events.add("error", "System", "system", str(e))
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/events', methods=['GET'])
+def get_events():
+    """Get collaboration events."""
+    return jsonify({"events": events.get_all()})
+
+
+@app.route('/api/events/stream')
+def event_stream():
+    """SSE stream for real-time events."""
+    def generate():
+        seen = set()
+        while True:
+            current_events = events.get_all()
+            for event in current_events:
+                event_id = f"{event['timestamp']}:{event['type']}"
+                if event_id not in seen:
+                    seen.add(event_id)
+                    yield f"data: {json.dumps(event)}\n\n"
+            import time
+            time.sleep(0.3)
+
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+        }
+    )
+
+
+@app.route('/api/events/clear', methods=['POST'])
+def clear_events_api():
+    """Clear all events."""
+    events.clear()
+    return jsonify({"success": True})
+
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=7860, debug=False)
+    app.run(host='0.0.0.0', port=5001, debug=False)
