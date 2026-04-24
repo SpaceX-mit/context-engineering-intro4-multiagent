@@ -1,46 +1,58 @@
-"""Linter Agent for code style and formatting analysis.
+"""Linter Agent - Code style checking and formatting."""
 
-This module provides the Linter Agent for code review.
-The agent uses PydanticAI for LLM interactions.
-"""
-
-from pathlib import Path
+from __future__ import annotations
 from typing import Optional
 
-from core.models import ReviewResult
-from .tools import lint_file, check_unused_imports, check_style, analyze_lint_result
-from .prompts import SYSTEM_PROMPT
+from agent_framework.ollama import OllamaChatClient
+
+from agents.base import BaseAgent, AgentConfig, AgentType
 
 
-def create_linter_agent():
-    """
-    Create and return the linter agent instance.
+LINTER_INSTRUCTIONS = '''You are the Linter Agent in the Multi-Agent Development System.
 
-    Returns:
-        Configured PydanticAI Agent for linting
-    """
-    from pydantic_ai import Agent
+Your role is to check code for style issues, formatting, and auto-fixable problems.
 
-    from providers import get_llm_model
+## When Given Code to Lint:
 
-    return Agent(
-        get_llm_model(),
-        deps_type=None,
-        system_prompt=SYSTEM_PROMPT,
+1. Syntax Check - Is the code syntactically correct?
+2. Style Issues - PEP8 violations, naming conventions
+3. Formatting - Indentation, whitespace, line length
+4. Imports - Unused imports, missing imports
+5. Auto-fixable - What can be automatically fixed?
+
+## Output Format
+
+### Style Issues
+Line | Issue | Auto-fix
+23 | Line too long | Yes
+45 | Unused import | Yes
+
+### Summary
+- Issues found: N
+- Auto-fixable: N
+- Needs manual review: N
+
+Be precise. Provide exact line numbers and corrections.'''
+
+
+def create_linter_agent(
+    client: Optional[OllamaChatClient] = None,
+    model: str = "llama3.2"
+) -> BaseAgent:
+    """Create a Linter agent."""
+    config = AgentConfig(
+        name="Linter",
+        role="Code style checking and formatting",
+        instructions=LINTER_INSTRUCTIONS,
+        agent_type=AgentType.LINTER,
+        tools=["linter", "file_search"],
     )
+    return BaseAgent(config, client)
 
 
-# Lazy-loaded agent instance
-_linter_agent = None
-
-
-def get_linter_agent():
-    """Get or create the linter agent instance."""
-    global _linter_agent
-    if _linter_agent is None:
-        _linter_agent = create_linter_agent()
-    return _linter_agent
-
-
-# For backward compatibility
-linter_agent = None
+def get_linter_agent(
+    client: Optional[OllamaChatClient] = None,
+    model: str = "llama3.2"
+) -> BaseAgent:
+    """Get or create Linter agent."""
+    return create_linter_agent(client, model)

@@ -1,37 +1,79 @@
-"""Test Agent for test coverage analysis."""
+"""Test Agent - Test generation and coverage analysis."""
 
-from pathlib import Path
+from __future__ import annotations
+from typing import Optional, Dict, Any
 
-from core.models import ReviewResult
-from .tools import analyze_coverage, suggest_tests, analyze_test_needs, generate_test_template
-from .prompts import SYSTEM_PROMPT
+from agent_framework.ollama import OllamaChatClient
+
+from agents.base import BaseAgent, AgentConfig, AgentType
 
 
-def create_test_agent():
-    """
-    Create and return the test agent instance.
+TESTER_INSTRUCTIONS = '''You are the Tester Agent in the Multi-Agent Development System.
 
-    Returns:
-        Configured PydanticAI Agent for test coverage
-    """
-    from pydantic_ai import Agent
+Your role is to generate tests and analyze test coverage.
 
-    from providers import get_llm_model
+## When Given Code to Test:
 
-    return Agent(
-        get_llm_model(),
-        deps_type=None,
-        system_prompt=SYSTEM_PROMPT,
+1. Understand the Code - What does it do?
+2. Identify Test Cases - Happy path, edge cases, errors
+3. Write Tests - pytest format with clear assertions
+4. Run Tests - Verify they pass
+5. Report Coverage - What percentage is covered?
+
+## Test Format
+
+Write test code in markdown blocks like this:
+"""python
+import pytest
+
+class TestClassName:
+    def test_method_happy_path(self):
+        obj = ClassName()
+        result = obj.method(input_val)
+        assert result == expected
+"""
+
+## Output Format
+
+### Tests Written
+- Test file
+- Lines covered
+
+### Test Results
+PASSED: 5
+FAILED: 0
+
+### Coverage
+- Functions: 80%
+- Lines: 75%
+
+Be thorough. Test edge cases, not just happy paths.'''
+
+
+def create_tester_agent(
+    client: Optional[OllamaChatClient] = None,
+    model: str = "llama3.2"
+) -> BaseAgent:
+    """Create a Tester agent."""
+    config = AgentConfig(
+        name="Tester",
+        role="Test generation and coverage analysis",
+        instructions=TESTER_INSTRUCTIONS,
+        agent_type=AgentType.TESTER,
+        tools=["code_runner", "shell"],
     )
+    return BaseAgent(config, client)
 
 
-# Lazy-loaded agent instance
-_test_agent = None
+def get_tester_agent(
+    client: Optional[OllamaChatClient] = None,
+    model: str = "llama3.2"
+) -> BaseAgent:
+    """Get or create Tester agent."""
+    return create_tester_agent(client, model)
 
 
-def get_test_agent():
-    """Get or create the test agent instance."""
-    global _test_agent
-    if _test_agent is None:
-        _test_agent = create_test_agent()
-    return _test_agent
+async def generate_tests(agent: BaseAgent, code: str) -> Dict[str, Any]:
+    """Generate tests for code and return results."""
+    response = await agent.run(f"Generate pytest tests for:\n\n{code}")
+    return {"tests_generated": True, "response": response}

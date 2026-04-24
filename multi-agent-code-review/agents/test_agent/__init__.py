@@ -1,11 +1,8 @@
-"""Test Agent module."""
+"""Tester Agent module."""
 
-from .agent import create_test_agent, get_test_agent
-from .tools import analyze_coverage, suggest_tests
+from .agent import create_tester_agent, get_tester_agent
 
 __all__ = [
-    "create_test_agent",
-    "get_test_agent",
-    "analyze_coverage",
-    "suggest_tests",
+    "create_tester_agent",
+    "get_tester_agent",
 ]

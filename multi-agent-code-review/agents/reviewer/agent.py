@@ -1,42 +1,71 @@
-"""Reviewer Agent for code quality assessment."""
+"""Reviewer Agent - Code quality assessment and logic review."""
 
-from pathlib import Path
+from __future__ import annotations
+from typing import Optional, Dict, Any
 
-from core.models import ReviewResult
-from .tools import (
-    analyze_complexity,
-    detect_security_issues,
-    assess_maintainability,
-    review_file,
-)
-from .prompts import SYSTEM_PROMPT
+from agent_framework.ollama import OllamaChatClient
+
+from agents.base import BaseAgent, AgentConfig, AgentType
 
 
-def create_reviewer_agent():
-    """
-    Create and return the reviewer agent instance.
+REVIEWER_INSTRUCTIONS = '''You are the Reviewer Agent in the Multi-Agent Development System.
 
-    Returns:
-        Configured PydanticAI Agent for code review
-    """
-    from pydantic_ai import Agent
+Your role is to check code for issues and provide quality assessment.
 
-    from providers import get_llm_model
+## When Given Code to Review:
 
-    return Agent(
-        get_llm_model(),
-        deps_type=None,
-        system_prompt=SYSTEM_PROMPT,
+1. Logic Check - Are there any logical errors?
+2. Security Scan - Are there security vulnerabilities?
+3. Performance - Any performance issues?
+4. Edge Cases - Are boundary conditions handled?
+5. Maintainability - Is code easy to understand and modify?
+
+## Output Format
+
+### Issues Found
+Severity | Location | Issue | Suggestion
+HIGH | line 42 | Null check missing | Add if x is None check
+
+### Suggestions
+- Suggestion 1
+- Suggestion 2
+
+### Overall Assessment
+Good/Poor - Brief summary with score 1-10
+
+If no issues found: "Code looks good!"
+
+Be thorough. Catching issues early saves time later.'''
+
+
+def create_reviewer_agent(
+    client: Optional[OllamaChatClient] = None,
+    model: str = "llama3.2"
+) -> BaseAgent:
+    """Create a Reviewer agent."""
+    config = AgentConfig(
+        name="Reviewer",
+        role="Code quality assessment and logic review",
+        instructions=REVIEWER_INSTRUCTIONS,
+        agent_type=AgentType.REVIEWER,
+        tools=["linter", "file_search"],
     )
+    return BaseAgent(config, client)
 
 
-# Lazy-loaded agent instance
-_reviewer_agent = None
+def get_reviewer_agent(
+    client: Optional[OllamaChatClient] = None,
+    model: str = "llama3.2"
+) -> BaseAgent:
+    """Get or create Reviewer agent."""
+    return create_reviewer_agent(client, model)
 
 
-def get_reviewer_agent():
-    """Get or create the reviewer agent instance."""
-    global _reviewer_agent
-    if _reviewer_agent is None:
-        _reviewer_agent = create_reviewer_agent()
-    return _reviewer_agent
+async def review_code(agent: BaseAgent, code: str) -> Dict[str, Any]:
+    """Review code and return structured results."""
+    response = await agent.run(f"Review this code:\n\n{code}")
+    return {
+        "review_text": response,
+        "issues_found": 0,
+        "severity": "none",
+    }

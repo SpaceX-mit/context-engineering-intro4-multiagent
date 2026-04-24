@@ -1,209 +1,87 @@
-"""Coder Agent for code generation."""
+"""Coder Agent - Code generation and implementation."""
 
-from typing import List, Optional
+from __future__ import annotations
+from typing import Optional, Tuple
 
-from pydantic_ai import Agent, RunContext
+from agent_framework.ollama import OllamaChatClient
 
-from core.models import CodeIssue, ReviewResult
-from .tools import (
-    generate_code_from_requirement,
-    validate_code,
-    suggest_tests,
-    format_code,
-    analyze_code_structure,
-)
-from .prompts import SYSTEM_PROMPT, CODE_GENERATION_PROMPT
+from agents.base import BaseAgent, AgentConfig, AgentType
 
 
-def create_coder_agent():
-    """
-    Create and return the coder agent instance.
+CODER_INSTRUCTIONS = '''You are the Coder Agent in the Multi-Agent Development System.
 
-    Returns:
-        Configured PydanticAI Agent for code generation
-    """
-    from pydantic_ai import Agent
+Your role is to write clean, working Python code that fulfills requirements.
 
-    from providers import get_llm_model
+## When Given a Task:
 
-    return Agent(
-        get_llm_model(),
-        deps_type=None,
-        system_prompt=SYSTEM_PROMPT,
+1. Understand the Spec - What needs to be built?
+2. Write Complete Code - Full implementation, not snippets
+3. Follow Best Practices - Type hints, docstrings, error handling
+4. Execute and Verify - Run the code to ensure it works
+5. Present Results - Show code and output
+
+## Code Format
+
+Write Python code in markdown blocks like this:
+"""python
+# filename.py
+"""Module docstring."""
+
+class ClassName:
+    """Class docstring."""
+
+    def method(self, param: str) -> str:
+        """Method docstring."""
+        return param
+"""
+
+## Execution
+
+Always execute code to verify it works. Show:
+1. The code written
+2. Output from running it
+
+## Quality Standards
+
+- Use type hints on all functions
+- Add docstrings for classes and public methods
+- Handle errors gracefully
+- Keep functions small and focused
+- Use clear variable names
+
+Be productive. Write code that works.'''
+
+
+def create_coder_agent(
+    client: Optional[OllamaChatClient] = None,
+    model: str = "llama3.2"
+) -> BaseAgent:
+    """Create a Coder agent."""
+    config = AgentConfig(
+        name="Coder",
+        role="Code generation and implementation",
+        instructions=CODER_INSTRUCTIONS,
+        agent_type=AgentType.CODER,
+        tools=["code_runner", "shell", "file_search"],
     )
+    return BaseAgent(config, client)
 
 
-# Lazy-loaded agent instance
-_coder_agent = None
+def get_coder_agent(
+    client: Optional[OllamaChatClient] = None,
+    model: str = "llama3.2"
+) -> BaseAgent:
+    """Get or create Coder agent."""
+    return create_coder_agent(client, model)
 
 
-def get_coder_agent() -> Agent:
-    """Get or create the coder agent instance."""
-    global _coder_agent
-    if _coder_agent is None:
-        _coder_agent = create_coder_agent()
-    return _coder_agent
+async def write_code(agent: BaseAgent, spec: str) -> Tuple[str, str]:
+    """Helper to write code from a spec."""
+    response = await agent.run(f"Write Python code for: {spec}")
 
+    # Extract code from markdown
+    import re
+    code_match = re.search(r"```python\n(.*?)```", response, re.DOTALL)
+    code = code_match.group(1).strip() if code_match else ""
 
-def run_coder_sync(prompt: str, timeout: int = 60) -> str:
-    """Run coder agent synchronously."""
-    import asyncio
-
-    async def _run():
-        agent = get_coder_agent()
-        result = await agent.run(prompt)
-        return result.output if hasattr(result, 'output') else str(result)
-
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # If loop is running, create new loop in thread
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(asyncio.run, _run())
-                return future.result(timeout=timeout)
-        else:
-            return asyncio.run(_run())
-    except Exception as e:
-        return f"# Error: {str(e)}"
-
-
-# Global tool variable
-coder_agent_tool = None
-
-
-def get_coder_tools():
-    """Get all tools for the coder agent."""
-    global coder_agent_tool
-
-    if coder_agent_tool is None:
-        agent = get_coder_agent()
-
-        @agent.tool
-        async def generate_code(
-            ctx: RunContext,
-            requirement: str,
-            language: str = "python",
-        ) -> str:
-            """
-            Generate code based on a requirement description.
-
-            Args:
-                requirement: Description of what the code should do
-                language: Programming language (default: python)
-
-            Returns:
-                Generated code
-            """
-            # Use the prompt template
-            prompt = CODE_GENERATION_PROMPT.format(requirement=requirement)
-            return f"# Code generation for: {requirement}\n\n# Implementation would be generated by LLM"
-
-        @agent.tool
-        async def validate_code(
-            ctx: RunContext,
-            code: str,
-        ) -> str:
-            """
-            Validate generated code for correctness.
-
-            Args:
-                code: Python code to validate
-
-            Returns:
-                Validation result
-            """
-            issues = validate_code(code)
-
-            if not issues:
-                return "Code is syntactically correct."
-
-            result = f"Found {len(issues)} issues:\n\n"
-            for issue in issues:
-                result += f"Line {issue.line}: {issue.message}\n"
-
-            return result
-
-        @agent.tool
-        async def create_tests(
-            ctx: RunContext,
-            code: str,
-            test_framework: str = "pytest",
-        ) -> str:
-            """
-            Generate tests for code.
-
-            Args:
-                code: Python code to generate tests for
-                test_framework: Testing framework to use
-
-            Returns:
-                Test code
-            """
-            return suggest_tests(code, test_framework)
-
-        @agent.tool
-        async def analyze_structure(
-            ctx: RunContext,
-            code: str,
-        ) -> str:
-            """
-            Analyze code structure.
-
-            Args:
-                code: Python code to analyze
-
-            Returns:
-                Structure analysis
-            """
-            result = analyze_code_structure(code)
-
-            output = f"Code Structure Analysis:\n\n"
-            output += f"Functions: {len(result['functions'])}\n"
-            for func in result["functions"]:
-                output += f"  - {func['name']} (line {func['line']})\n"
-
-            output += f"\nClasses: {len(result['classes'])}\n"
-            for cls in result["classes"]:
-                output += f"  - {cls['name']} (line {cls['line']})\n"
-
-            output += f"\nImports: {len(result['imports'])}\n"
-
-            return output
-
-        coder_agent_tool = agent
-
-    return coder_agent_tool
-
-
-def create_code(requirement: str) -> str:
-    """
-    Create code based on a requirement.
-
-    Args:
-        requirement: Description of what to build
-
-    Returns:
-        Generated code
-    """
-    return generate_code_from_requirement(requirement)
-
-
-def validate_and_format(code: str) -> dict:
-    """
-    Validate and format code.
-
-    Args:
-        code: Python code to process
-
-    Returns:
-        Dictionary with validation result and formatted code
-    """
-    issues = validate_code(code)
-    formatted = format_code(code)
-
-    return {
-        "valid": len(issues) == 0,
-        "issues": issues,
-        "code": formatted,
-    }
+    return code, response

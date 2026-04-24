@@ -1,40 +1,68 @@
-"""Fixer Agent for automatic code fixes."""
+"""Fixer Agent - Problem repair and code optimization."""
 
-from pathlib import Path
+from __future__ import annotations
+from typing import Optional, List, Dict, Any
 
-from pydantic_ai import Agent, RunContext
+from agent_framework.ollama import OllamaChatClient
 
-from providers import get_llm_model
-from core.models import CodeIssue, ReviewResult
-from .tools import fix_imports, fix_style_issues, verify_fix, apply_fixes
-from .prompts import SYSTEM_PROMPT
+from agents.base import BaseAgent, AgentConfig, AgentType
 
 
-def create_fixer_agent():
-    """
-    Create and return the fixer agent instance.
+FIXER_INSTRUCTIONS = '''You are the Fixer Agent in the Multi-Agent Development System.
 
-    Returns:
-        Configured PydanticAI Agent for code fixing
-    """
-    from pydantic_ai import Agent
+Your role is to automatically fix code issues and optimize code quality.
 
-    from providers import get_llm_model
+## When Given Issues to Fix:
 
-    return Agent(
-        get_llm_model(),
-        deps_type=None,
-        system_prompt=SYSTEM_PROMPT,
+1. Understand the Issue - What needs to be fixed?
+2. Apply Fix - Make the minimal change needed
+3. Verify - Ensure fix does not break functionality
+4. Optimize - Improve code where appropriate
+
+## Issue Types
+
+Type | Action
+Linter | Auto-fix style issues
+Reviewer | Apply suggested changes
+Logic | Refactor for correctness
+Security | Apply security best practices
+
+## Output Format
+
+### Fixes Applied
+Original | Fixed | Reason
+x=1 | x = 1 | PEP8 spacing
+
+### Verification
+How the fix was verified
+
+Be careful. Only fix what was requested. Do not make unnecessary changes.'''
+
+
+def create_fixer_agent(
+    client: Optional[OllamaChatClient] = None,
+    model: str = "llama3.2"
+) -> BaseAgent:
+    """Create a Fixer agent."""
+    config = AgentConfig(
+        name="Fixer",
+        role="Problem repair and code optimization",
+        instructions=FIXER_INSTRUCTIONS,
+        agent_type=AgentType.FIXER,
+        tools=["code_runner", "shell", "file_search"],
     )
+    return BaseAgent(config, client)
 
 
-# Lazy-loaded agent instance
-_fixer_agent = None
+def get_fixer_agent(
+    client: Optional[OllamaChatClient] = None,
+    model: str = "llama3.2"
+) -> BaseAgent:
+    """Get or create Fixer agent."""
+    return create_fixer_agent(client, model)
 
 
-def get_fixer_agent():
-    """Get or create the fixer agent instance."""
-    global _fixer_agent
-    if _fixer_agent is None:
-        _fixer_agent = create_fixer_agent()
-    return _fixer_agent
+async def fix_code(agent: BaseAgent, code: str, issues: List[str]) -> Dict[str, Any]:
+    """Fix code issues and return results."""
+    response = await agent.run(f"Fix these issues in the code:\n\n{issues}\n\nCode:\n{code}")
+    return {"fixed": True, "response": response}
