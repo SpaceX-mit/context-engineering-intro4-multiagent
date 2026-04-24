@@ -5,6 +5,7 @@ Based on PRD.md Section 5 and Codex architecture:
 - execute_workflow: Execute a workflow with context
 - pause/resume/cancel: Workflow lifecycle management
 - Sequential/Concurrent/Iterative execution modes
+- DATA FLOW: Each agent's input comes from the previous agent's output
 """
 
 from __future__ import annotations
@@ -41,15 +42,57 @@ class StepStatus(Enum):
 
 
 @dataclass
+class StepInput:
+    """Input data for a workflow step.
+
+    Contains data from:
+    - Previous step's output (via output_to field)
+    - Initial requirement (for first step)
+    - Combined data from multiple previous steps
+    """
+    step_name: str
+    agent: str
+    data: Any  # The actual input data for this step
+    source: str  # Where this data came from (e.g., "requirement", "planner.output")
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def get_text(self) -> str:
+        """Get input as text."""
+        if isinstance(self.data, str):
+            return self.data
+        return str(self.data)
+
+    def get_dict(self) -> Dict[str, Any]:
+        """Get input as dict."""
+        if isinstance(self.data, dict):
+            return self.data
+        return {"data": self.data}
+
+
+@dataclass
+class StepOutput:
+    """Output data from a workflow step."""
+    step_name: str
+    agent: str
+    result: Any
+    output_key: str  # The key this output is stored under
+    success: bool = True
+    error: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class WorkflowStep:
     """A single step in a workflow."""
     name: str
     agent: str
     action: str
-    input_from: List[str] = field(default_factory=list)
-    output_to: Optional[str] = None
+    input_from: List[str] = field(default_factory=list)  # Sources for input data
+    output_to: Optional[str] = None  # Where to store the output
     status: StepStatus = StepStatus.PENDING
     result: Optional[Any] = None
+    input_data: Optional[StepInput] = None  # Computed input for this step
+    output_data: Optional[StepOutput] = None  # Output from this step
     error: Optional[str] = None
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
@@ -105,7 +148,7 @@ class WorkflowExecution:
     current_iteration: int = 1
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
-    step_results: Dict[str, Any] = field(default_factory=dict)
+    step_outputs: Dict[str, StepOutput] = field(default_factory=dict)  # Key: output key (e.g., "plan", "code")
     errors: List[str] = field(default_factory=list)
 
     def get_current_step(self) -> Optional[WorkflowStep]:
@@ -113,6 +156,86 @@ class WorkflowExecution:
         if self.current_step_index < len(self.definition.steps):
             return self.definition.steps[self.current_step_index]
         return None
+
+    def get_input_for_step(self, step: WorkflowStep) -> StepInput:
+        """Build the input for a step from previous outputs.
+
+        Data flow:
+        - For "requirement" input: use context.requirement
+        - For "plan" input: use previous planner output
+        - For "code" input: use previous coder output
+        - For "issues": combine lint + review outputs
+        """
+        if step.input_from:
+            # Collect data from all sources
+            all_data = {}
+            sources = []
+
+            for source_key in step.input_from:
+                if source_key == "requirement":
+                    all_data["requirement"] = self.context.requirement
+                    sources.append("context.requirement")
+                elif source_key == "plan":
+                    if "plan" in self.step_outputs:
+                        all_data["plan"] = self.step_outputs["plan"].result
+                        sources.append("planner.output")
+                elif source_key == "code":
+                    if "code" in self.step_outputs:
+                        all_data["code"] = self.step_outputs["code"].result
+                        sources.append("coder.output")
+                    elif self.context.code:
+                        all_data["code"] = self.context.code
+                        sources.append("context.code")
+                elif source_key == "lint_issues":
+                    if "lint_issues" in self.step_outputs:
+                        all_data["lint_issues"] = self.step_outputs["lint_issues"].result
+                        sources.append("linter.output")
+                elif source_key == "review_issues":
+                    if "review_issues" in self.step_outputs:
+                        all_data["review_issues"] = self.step_outputs["review_issues"].result
+                        sources.append("reviewer.output")
+                elif source_key == "issues":
+                    # Combine all issues
+                    issues = []
+                    if "lint_issues" in self.step_outputs:
+                        issues.extend(self.step_outputs["lint_issues"].result or [])
+                    if "review_issues" in self.step_outputs:
+                        issues.extend(self.step_outputs["review_issues"].result or [])
+                    all_data["issues"] = issues
+                    sources.append("combined_issues")
+                elif source_key == "fixed_code":
+                    if "fixed_code" in self.step_outputs:
+                        all_data["fixed_code"] = self.step_outputs["fixed_code"].result
+                        sources.append("fixer.output")
+                elif source_key == "tests":
+                    if "tests" in self.step_outputs:
+                        all_data["tests"] = self.step_outputs["tests"].result
+                        sources.append("tester.output")
+                elif source_key in self.step_outputs:
+                    all_data[source_key] = self.step_outputs[source_key].result
+                    sources.append(f"{source_key}.output")
+
+            # Return the data - if single source, return that directly
+            if len(step.input_from) == 1:
+                source = step.input_from[0]
+                data = all_data.get(source, all_data.get(list(all_data.keys())[0] if all_data else None))
+            else:
+                data = all_data
+
+            return StepInput(
+                step_name=step.name,
+                agent=step.agent,
+                data=data,
+                source=" -> ".join(sources) if sources else "unknown",
+            )
+
+        # No input specified, return None
+        return StepInput(
+            step_name=step.name,
+            agent=step.agent,
+            data=None,
+            source="none",
+        )
 
 
 @dataclass
@@ -374,16 +497,71 @@ class WorkflowOrchestrator:
         execution: WorkflowExecution,
         step: WorkflowStep,
     ) -> Any:
-        """Execute a single step."""
+        """
+        Execute a single step with proper data flow.
+
+        Data flow:
+        1. Build input from previous step outputs (via input_from field)
+        2. Pass input to handler
+        3. Store output under the output_to key
+        """
+        # Build input for this step
+        step_input = execution.get_input_for_step(step)
+        step.input_data = step_input
+
+        # Call the handler with input
         handler_key = f"{step.agent}:{step.action}"
         handler = self._step_handlers.get(handler_key)
 
         if handler:
-            return await handler(execution.context, step)
+            # Handler receives: step_input (the computed input)
+            result = await handler(step_input, execution.context)
+        else:
+            # Simulate step execution if no handler
+            await asyncio.sleep(0.1)
+            result = {"status": "completed", "agent": step.agent, "action": step.action}
 
-        # Simulate step execution if no handler
-        await asyncio.sleep(0.1)
-        return {"status": "completed", "agent": step.agent, "action": step.action}
+        # Store output under the output_to key
+        output_key = step.output_to or step.name
+        step_output = StepOutput(
+            step_name=step.name,
+            agent=step.agent,
+            result=result,
+            output_key=output_key,
+            success=True,
+        )
+        step.output_data = step_output
+        execution.step_outputs[output_key] = step_output
+
+        # Also update context based on output
+        self._update_context_from_output(execution.context, step, result)
+
+        return result
+
+    def _update_context_from_output(
+        self,
+        context: WorkflowContext,
+        step: WorkflowStep,
+        result: Any,
+    ):
+        """Update context based on step output."""
+        output_key = step.output_to or step.name
+
+        # Map output keys to context fields
+        context_updates = {
+            "plan": lambda r: context.set_plan(r if isinstance(r, str) else str(r)),
+            "code": lambda r: context.set_code(r if isinstance(r, str) else str(r)),
+            "lint_issues": lambda r: context.add_lint_issues(r if isinstance(r, list) else []),
+            "review_issues": lambda r: context.add_review_issues(r if isinstance(r, list) else []),
+            "fixed_code": lambda r: context.set_fixed_code(r if isinstance(r, str) else str(r)),
+            "tests": lambda r: context.set_tests(r if isinstance(r, str) else str(r)),
+        }
+
+        if output_key in context_updates:
+            try:
+                context_updates[output_key](result)
+            except Exception:
+                pass  # Ignore update errors
 
     async def _execute_step_with_tracking(
         self,
@@ -394,10 +572,17 @@ class WorkflowOrchestrator:
         """Execute step and track results."""
         try:
             result = await self._execute_step(execution, step)
-            execution.step_results[step.name] = result
             return result
         except Exception as e:
-            execution.step_results[step.name] = {"error": str(e)}
+            # Store error in step output
+            step.output_data = StepOutput(
+                step_name=step.name,
+                agent=step.agent,
+                result=None,
+                output_key=step.output_to or step.name,
+                success=False,
+                error=str(e),
+            )
             raise
 
     def pause_workflow(self, workflow_id: str) -> bool:

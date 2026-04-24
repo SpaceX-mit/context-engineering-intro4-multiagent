@@ -100,56 +100,105 @@ def format_event(event: dict) -> str:
 orch = WorkflowOrchestrator()
 
 async def setup_handlers():
-    """Set up workflow handlers with event emission."""
+    """Set up workflow handlers with event emission.
 
-    async def planner_handler(context, step):
+    Data Flow:
+    - Planner receives requirement -> outputs plan
+    - Coder receives plan -> outputs code
+    - Linter receives code -> outputs lint_issues
+    - Reviewer receives code -> outputs review_issues
+    - Fixer receives code + issues -> outputs fixed_code
+    - Tester receives fixed_code -> outputs tests
+    """
+
+    async def planner_handler(step_input, context):
+        """Planner: requirement -> plan"""
         events.add("running", "Sam", "planner", "Creating plan...")
         await asyncio.sleep(0.3)
-        plan = get_planner_agent().plan(context.requirement)
-        context.set_plan(plan.overview)
-        events.add("completed", "Sam", "planner", f"Plan: {plan.overview[:30]}...")
-        return {"plan": plan.overview}
 
-    async def coder_handler(context, step):
+        # step_input.data contains the requirement
+        requirement = step_input.data
+        if isinstance(requirement, dict):
+            requirement = requirement.get("requirement", str(requirement))
+
+        plan = get_planner_agent().plan(requirement)
+        events.add("completed", "Sam", "planner", f"Plan: {plan.overview[:50]}...")
+        return plan.overview
+
+    async def coder_handler(step_input, context):
+        """Coder: plan -> code"""
         events.add("running", "Codey", "coder", "Writing code...")
         await asyncio.sleep(0.4)
-        code = get_coder_agent().implement(context.requirement)
-        context.set_code(code)
-        events.add("completed", "Codey", "coder", f"Generated {len(code.splitlines())} lines")
-        return {"code_generated": True}
 
-    async def linter_handler(context, step):
+        # step_input.data contains the plan from planner
+        plan_text = step_input.data
+        if isinstance(plan_text, dict):
+            plan_text = plan_text.get("plan", str(plan_text))
+
+        # Get requirement from context for code generation
+        code = get_coder_agent().implement(context.requirement)
+        events.add("completed", "Codey", "coder", f"Generated {len(code.splitlines())} lines")
+        return code
+
+    async def linter_handler(step_input, context):
+        """Linter: code -> lint_issues"""
         events.add("running", "Lint", "linter", "Checking style...")
         await asyncio.sleep(0.2)
-        issues = get_linter_agent().lint(context.code)
-        context.lint_issues = issues
-        events.add("completed", "Lint", "linter", f"Found {len(issues)} issues")
-        return {"issues": len(issues)}
 
-    async def reviewer_handler(context, step):
+        # step_input.data contains the code from coder
+        code = step_input.data
+        if isinstance(code, dict):
+            code = code.get("code", str(code))
+
+        issues = get_linter_agent().lint(code)
+        events.add("completed", "Lint", "linter", f"Found {len(issues)} issues")
+        return issues
+
+    async def reviewer_handler(step_input, context):
+        """Reviewer: code -> review_issues"""
         events.add("running", "Robie", "reviewer", "Reviewing quality...")
         await asyncio.sleep(0.3)
-        result = get_reviewer_agent().review(context.code)
-        context.review_issues = result.issues
-        events.add("completed", "Robie", "reviewer", f"Score: {result.score}/100")
-        return {"score": result.score}
 
-    async def fixer_handler(context, step):
+        # step_input.data contains the code from coder
+        code = step_input.data
+        if isinstance(code, dict):
+            code = code.get("code", str(code))
+
+        result = get_reviewer_agent().review(code)
+        events.add("completed", "Robie", "reviewer", f"Score: {result.score}/100")
+        return result.issues
+
+    async def fixer_handler(step_input, context):
+        """Fixer: code + issues -> fixed_code"""
         events.add("running", "Fix", "fixer", "Applying fixes...")
         await asyncio.sleep(0.3)
-        all_issues = context.lint_issues + context.review_issues
-        fixed = get_fixer_agent().fix(context.code, all_issues)
-        context.fixed_code = fixed
-        events.add("completed", "Fix", "fixer", f"Applied {len(all_issues)} fixes")
-        return {"fixed": len(all_issues)}
 
-    async def tester_handler(context, step):
+        # step_input.data contains {code, issues}
+        data = step_input.data
+        if isinstance(data, dict):
+            code = data.get("code", "")
+            all_issues = data.get("issues", [])
+        else:
+            code = context.code or ""
+            all_issues = []
+
+        fixed = get_fixer_agent().fix(code, all_issues)
+        events.add("completed", "Fix", "fixer", f"Applied {len(all_issues)} fixes")
+        return fixed
+
+    async def tester_handler(step_input, context):
+        """Tester: fixed_code -> tests"""
         events.add("running", "Testy", "tester", "Generating tests...")
         await asyncio.sleep(0.3)
-        tests = get_tester_agent().generate_tests(context.fixed_code or context.code)
-        context.set_tests(tests)
+
+        # step_input.data contains the fixed code
+        code = step_input.data
+        if isinstance(code, dict):
+            code = code.get("fixed_code", str(code))
+
+        tests = get_tester_agent().generate_tests(code)
         events.add("completed", "Testy", "tester", "Tests generated")
-        return {"tests_generated": True}
+        return tests
 
     orch.register_step_handler("planner", "plan", planner_handler)
     orch.register_step_handler("coder", "implement", coder_handler)
