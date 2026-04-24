@@ -1,68 +1,73 @@
-"""Fixer Agent - Problem repair and code optimization."""
+"""Fixer Agent - Auto-fixes code issues."""
 
 from __future__ import annotations
-from typing import Optional, List, Dict, Any
+from typing import List, Optional
 
-from agent_framework.ollama import OllamaChatClient
-
-from agents.base import BaseAgent, AgentConfig, AgentType
-
-
-FIXER_INSTRUCTIONS = '''You are the Fixer Agent in the Multi-Agent Development System.
-
-Your role is to automatically fix code issues and optimize code quality.
-
-## When Given Issues to Fix:
-
-1. Understand the Issue - What needs to be fixed?
-2. Apply Fix - Make the minimal change needed
-3. Verify - Ensure fix does not break functionality
-4. Optimize - Improve code where appropriate
-
-## Issue Types
-
-Type | Action
-Linter | Auto-fix style issues
-Reviewer | Apply suggested changes
-Logic | Refactor for correctness
-Security | Apply security best practices
-
-## Output Format
-
-### Fixes Applied
-Original | Fixed | Reason
-x=1 | x = 1 | PEP8 spacing
-
-### Verification
-How the fix was verified
-
-Be careful. Only fix what was requested. Do not make unnecessary changes.'''
+from agents.base import AgentConfig, AgentType, BaseAgent
+from core.context import CodeIssue, WorkflowContext
 
 
-def create_fixer_agent(
-    client: Optional[OllamaChatClient] = None,
-    model: str = "llama3.2"
-) -> BaseAgent:
-    """Create a Fixer agent."""
-    config = AgentConfig(
-        name="Fixer",
-        role="Problem repair and code optimization",
-        instructions=FIXER_INSTRUCTIONS,
-        agent_type=AgentType.FIXER,
-        tools=["code_runner", "shell", "file_search"],
-    )
-    return BaseAgent(config, client)
+class FixerAgent(BaseAgent):
+    """Fixer Agent - auto-fixes identified issues."""
+
+    def __init__(self, config: Optional[AgentConfig] = None):
+        if config is None:
+            config = AgentConfig(
+                name="Fixer",
+                role="fixer",
+                instructions="Fix code issues automatically",
+                agent_type=AgentType.FIXER,
+                model="llama3.2",
+            )
+        super().__init__(config)
+
+    def fix(self, code: str, issues: List[CodeIssue]) -> str:
+        """Fix code issues."""
+        fixed_code = code
+        fixed_count = 0
+
+        for issue in issues:
+            if issue.auto_fixable:
+                # Apply fixes based on issue type
+                if issue.issue_type == "style" and "trailing whitespace" in issue.message.lower():
+                    lines = fixed_code.split('\n')
+                    if issue.line and issue.line <= len(lines):
+                        lines[issue.line - 1] = lines[issue.line - 1].rstrip()
+                        fixed_code = '\n'.join(lines)
+                        fixed_count += 1
+
+                elif issue.issue_type == "style" and "line too long" in issue.message.lower():
+                    lines = fixed_code.split('\n')
+                    if issue.line and issue.line <= len(lines):
+                        line = lines[issue.line - 1]
+                        if len(line) > 100:
+                            lines[issue.line - 1] = line[:97] + "..."
+                            fixed_code = '\n'.join(lines)
+                            fixed_count += 1
+
+        return fixed_code
+
+    async def run(self, prompt: str, context: Optional[WorkflowContext] = None) -> str:
+        code = context.code if context and context.code else ""
+        issues = []
+        if context:
+            issues = context.lint_issues + context.review_issues
+
+        if issues:
+            fixed = self.fix(code, issues)
+            return f"## Fixed Code\n\nApplied {len([i for i in issues if i.auto_fixable])} fixes\n"
+        return "No fixes needed\n"
 
 
-def get_fixer_agent(
-    client: Optional[OllamaChatClient] = None,
-    model: str = "llama3.2"
-) -> BaseAgent:
-    """Get or create Fixer agent."""
-    return create_fixer_agent(client, model)
+def create_fixer_agent() -> FixerAgent:
+    return FixerAgent()
 
 
-async def fix_code(agent: BaseAgent, code: str, issues: List[str]) -> Dict[str, Any]:
-    """Fix code issues and return results."""
-    response = await agent.run(f"Fix these issues in the code:\n\n{issues}\n\nCode:\n{code}")
-    return {"fixed": True, "response": response}
+_fixer_agent: Optional[FixerAgent] = None
+
+
+def get_fixer_agent() -> FixerAgent:
+    global _fixer_agent
+    if _fixer_agent is None:
+        _fixer_agent = FixerAgent()
+    return _fixer_agent

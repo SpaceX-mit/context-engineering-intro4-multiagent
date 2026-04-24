@@ -1,71 +1,110 @@
-"""Reviewer Agent - Code quality assessment and logic review."""
+"""Reviewer Agent - Reviews code quality."""
 
 from __future__ import annotations
-from typing import Optional, Dict, Any
 
-from agent_framework.ollama import OllamaChatClient
+from typing import List, Optional
 
-from agents.base import BaseAgent, AgentConfig, AgentType
+from agents.base import AgentConfig, AgentType, BaseAgent
+from core.context import CodeIssue, WorkflowContext
 
-
-REVIEWER_INSTRUCTIONS = '''You are the Reviewer Agent in the Multi-Agent Development System.
-
-Your role is to check code for issues and provide quality assessment.
-
-## When Given Code to Review:
-
-1. Logic Check - Are there any logical errors?
-2. Security Scan - Are there security vulnerabilities?
-3. Performance - Any performance issues?
-4. Edge Cases - Are boundary conditions handled?
-5. Maintainability - Is code easy to understand and modify?
-
-## Output Format
-
-### Issues Found
-Severity | Location | Issue | Suggestion
-HIGH | line 42 | Null check missing | Add if x is None check
-
-### Suggestions
-- Suggestion 1
-- Suggestion 2
-
-### Overall Assessment
-Good/Poor - Brief summary with score 1-10
-
-If no issues found: "Code looks good!"
-
-Be thorough. Catching issues early saves time later.'''
+from .prompts import REVIEWER_PROMPT
+from .tools import (
+    ReviewResult,
+    check_security,
+    format_review_report,
+    review_code,
+)
 
 
-def create_reviewer_agent(
-    client: Optional[OllamaChatClient] = None,
-    model: str = "llama3.2"
-) -> BaseAgent:
-    """Create a Reviewer agent."""
-    config = AgentConfig(
-        name="Reviewer",
-        role="Code quality assessment and logic review",
-        instructions=REVIEWER_INSTRUCTIONS,
-        agent_type=AgentType.REVIEWER,
-        tools=["linter", "file_search"],
-    )
-    return BaseAgent(config, client)
+class ReviewerAgent(BaseAgent):
+    """
+    Reviewer Agent - reviews code quality and security.
+
+    Responsibilities:
+    - Review code for quality issues
+    - Check for security vulnerabilities
+    - Verify logic correctness
+    - Provide actionable feedback
+    """
+
+    def __init__(self, config: Optional[AgentConfig] = None):
+        if config is None:
+            config = AgentConfig(
+                name="Reviewer",
+                role="reviewer",
+                instructions=REVIEWER_PROMPT,
+                agent_type=AgentType.REVIEWER,
+                model="llama3.2",
+            )
+        super().__init__(config)
+        self._last_review: Optional[ReviewResult] = None
+
+    def review(self, code: str) -> ReviewResult:
+        """
+        Review code.
+
+        Args:
+            code: Python code to review
+
+        Returns:
+            Review result
+        """
+        result = review_code(code)
+        self._last_review = result
+        return result
+
+    def check_security(self, code: str) -> List[CodeIssue]:
+        """Check for security issues."""
+        return check_security(code)
+
+    def get_last_review(self) -> Optional[ReviewResult]:
+        """Get the last review result."""
+        return self._last_review
+
+    def get_critical_issues(self) -> List[CodeIssue]:
+        """Get critical issues from last review."""
+        if self._last_review:
+            return [i for i in self._last_review.issues if i.severity.value == "critical"]
+        return []
+
+    async def run(self, prompt: str, context: Optional[WorkflowContext] = None) -> str:
+        """
+        Run reviewer on code.
+
+        Args:
+            prompt: Code or context
+            context: Optional workflow context
+
+        Returns:
+            Review report
+        """
+        # Get code from context if available
+        if context and context.code:
+            code = context.code
+        else:
+            code = prompt
+
+        result = self.review(code)
+
+        output = format_review_report(result)
+        output += f"\n**Overall:** {'Pass' if result.score >= 70 else 'Needs Improvement'}\n"
+
+        return output
 
 
-def get_reviewer_agent(
-    client: Optional[OllamaChatClient] = None,
-    model: str = "llama3.2"
-) -> BaseAgent:
-    """Get or create Reviewer agent."""
-    return create_reviewer_agent(client, model)
+# Factory function
+def create_reviewer_agent() -> ReviewerAgent:
+    """Create a reviewer agent."""
+    return ReviewerAgent()
 
 
-async def review_code(agent: BaseAgent, code: str) -> Dict[str, Any]:
-    """Review code and return structured results."""
-    response = await agent.run(f"Review this code:\n\n{code}")
-    return {
-        "review_text": response,
-        "issues_found": 0,
-        "severity": "none",
-    }
+# Lazy singleton
+_reviewer_agent: Optional[ReviewerAgent] = None
+
+
+def get_reviewer_agent() -> ReviewerAgent:
+    """Get or create the reviewer agent."""
+    global _reviewer_agent
+    if _reviewer_agent is None:
+        _reviewer_agent = ReviewerAgent()
+    return _reviewer_agent

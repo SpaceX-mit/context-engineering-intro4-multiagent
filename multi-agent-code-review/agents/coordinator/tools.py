@@ -1,193 +1,177 @@
-"""Tools for Coordinator Agent."""
+"""Tools for the Coordinator Agent."""
 
-import asyncio
-from pathlib import Path
-from typing import List, Optional
-
-from core.models import (
-    CodeIssue,
-    ReviewResult,
-    ReviewReport,
-    ReviewRequest,
-    WorkflowState,
-)
-from agents.linter.tools import lint_file
-from agents.reviewer.tools import review_file
-from agents.test_agent.tools import analyze_test_needs
-from agents.fixer.tools import apply_fixes
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 
-async def orchestrate_review(request: ReviewRequest) -> ReviewReport:
+@dataclass
+class Task:
+    """A task to be executed by an agent."""
+    name: str
+    agent: str
+    action: str
+    input_data: Dict[str, Any] = field(default_factory=dict)
+    status: str = "pending"
+    result: Optional[Any] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class RequirementAnalysis:
+    """Analysis of a user requirement."""
+    summary: str
+    components: List[str]
+    complexity: int  # 1-5
+    workflow_type: str  # sequential/concurrent/iterative
+    agent_sequence: List[str]
+    tasks: List[Task] = field(default_factory=list)
+
+
+def parse_requirement(requirement: str) -> RequirementAnalysis:
     """
-    Orchestrate a multi-agent code review.
+    Parse a user requirement into structured components.
 
     Args:
-        request: Review request with paths and options
+        requirement: Raw user requirement
 
     Returns:
-        Unified review report
+        Structured requirement analysis
     """
-    results: List[ReviewResult] = []
-    files = []
+    # Simple keyword-based parsing
+    requirement_lower = requirement.lower()
 
-    # Collect all Python files
-    for path_str in request.paths:
-        path = Path(path_str)
-        if path.is_file() and path.suffix == ".py":
-            files.append(str(path))
-        elif path.is_dir():
-            files.extend([str(f) for f in path.rglob("*.py") if "__pycache__" not in str(f)])
+    # Determine complexity
+    complexity = 1
+    if any(kw in requirement_lower for kw in ["complex", "multiple", "several"]):
+        complexity = 3
+    if any(kw in requirement_lower for kw in ["simple", "basic", "hello"]):
+        complexity = 1
 
-    # Run agents in parallel
+    # Determine workflow type
+    if any(kw in requirement_lower for kw in ["concurrent", "parallel", "multiple agents"]):
+        workflow_type = "concurrent"
+    elif any(kw in requirement_lower for kw in ["iterate", "improve", "refine"]):
+        workflow_type = "iterative"
+    else:
+        workflow_type = "sequential"
+
+    # Determine agent sequence
+    if "review" in requirement_lower or "check" in requirement_lower:
+        agent_sequence = ["linter", "reviewer"]
+    elif "test" in requirement_lower:
+        agent_sequence = ["coder", "tester"]
+    else:
+        agent_sequence = ["planner", "coder", "linter", "reviewer", "fixer", "tester"]
+
+    return RequirementAnalysis(
+        summary=requirement[:100] + "..." if len(requirement) > 100 else requirement,
+        components=[requirement],
+        complexity=complexity,
+        workflow_type=workflow_type,
+        agent_sequence=agent_sequence,
+    )
+
+
+def decompose_tasks(analysis: RequirementAnalysis) -> List[Task]:
+    """
+    Decompose requirement analysis into specific tasks.
+
+    Args:
+        analysis: Parsed requirement analysis
+
+    Returns:
+        List of tasks to execute
+    """
     tasks = []
-    for file_path in files:
-        tasks.append(_run_linter(file_path))
-        tasks.append(_run_reviewer(file_path))
-        if request.include_complexity:
-            tasks.append(_run_test_agent(file_path))
 
-    # Execute all tasks
-    task_results = await asyncio.gather(*tasks, return_exceptions=True)
+    # Planner task
+    if "planner" in analysis.agent_sequence:
+        tasks.append(Task(
+            name="plan",
+            agent="planner",
+            action="plan",
+            input_data={"requirement": analysis.summary},
+        ))
 
-    for result in task_results:
-        if isinstance(result, ReviewResult):
-            results.append(result)
-        elif isinstance(result, Exception):
-            # Log error but continue
-            pass
+    # Coder task
+    if "coder" in analysis.agent_sequence:
+        tasks.append(Task(
+            name="implement",
+            agent="coder",
+            action="implement",
+            input_data={},
+        ))
 
-    # Create report
-    report = ReviewReport.from_results(results, len(files))
+    # Linter task
+    if "linter" in analysis.agent_sequence:
+        tasks.append(Task(
+            name="lint",
+            agent="linter",
+            action="lint",
+            input_data={},
+        ))
 
-    # Apply fixes if requested
-    if request.auto_fix and report.summary.auto_fixed > 0:
-        fix_results = await _apply_fixes(files, report.details)
-        report.summary.auto_fixed = len(fix_results)
+    # Reviewer task
+    if "reviewer" in analysis.agent_sequence:
+        tasks.append(Task(
+            name="review",
+            agent="reviewer",
+            action="review",
+            input_data={},
+        ))
 
-    return report
+    # Fixer task
+    if "fixer" in analysis.agent_sequence:
+        tasks.append(Task(
+            name="fix",
+            agent="fixer",
+            action="fix",
+            input_data={},
+        ))
 
+    # Tester task
+    if "tester" in analysis.agent_sequence:
+        tasks.append(Task(
+            name="test",
+            agent="tester",
+            action="test",
+            input_data={},
+        ))
 
-async def _run_linter(file_path: str) -> ReviewResult:
-    """Run linter on a file."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, lint_file, file_path)
-
-
-async def _run_reviewer(file_path: str) -> ReviewResult:
-    """Run reviewer on a file."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, review_file, file_path)
-
-
-async def _run_test_agent(file_path: str) -> ReviewResult:
-    """Run test agent on a file."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, analyze_test_needs, file_path)
-
-
-async def _apply_fixes(files: List[str], issues: List[CodeIssue]) -> List[ReviewResult]:
-    """Apply fixes to files."""
-    tasks = []
-    for file_path in files:
-        file_issues = [i for i in issues if i.file == file_path and i.auto_fixable]
-        if file_issues:
-            loop = asyncio.get_event_loop()
-            tasks.append(loop.run_in_executor(None, apply_fixes, file_path, file_issues))
-
-    if tasks:
-        return await asyncio.gather(*tasks, return_exceptions=True)
-    return []
+    return tasks
 
 
-def aggregate_results(results: List[ReviewResult]) -> dict:
+def aggregate_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Aggregate results from multiple agents.
 
     Args:
-        results: List of ReviewResult objects
+        results: List of results from agents
 
     Returns:
-        Aggregated summary dictionary
+        Aggregated result summary
     """
-    summary = {
-        "total_issues": 0,
-        "by_agent": {},
-        "by_severity": {"critical": 0, "high": 0, "medium": 0, "low": 0},
-        "by_type": {},
-        "auto_fixable": 0,
-    }
+    total_issues = 0
+    critical_issues = 0
+    fixed_issues = 0
+    actions_taken = []
 
     for result in results:
-        if result.status != "success":
-            continue
+        if "issues" in result:
+            total_issues += len(result["issues"])
+            critical_issues += len([i for i in result["issues"] if i.get("severity") == "critical"])
 
-        if result.agent not in summary["by_agent"]:
-            summary["by_agent"][result.agent] = 0
-        summary["by_agent"][result.agent] += len(result.issues)
+        if "fixed" in result:
+            fixed_issues += result["fixed"]
 
-        for issue in result.issues:
-            summary["total_issues"] += 1
-            summary["by_severity"][issue.severity.value] += 1
+        if "action" in result:
+            actions_taken.append(result["action"])
 
-            if issue.issue_type.value not in summary["by_type"]:
-                summary["by_type"][issue.issue_type.value] = 0
-            summary["by_type"][issue.issue_type.value] += 1
-
-            if issue.auto_fixable:
-                summary["auto_fixable"] += 1
-
-    return summary
-
-
-def generate_report(report: ReviewReport, include_details: bool = True) -> str:
-    """
-    Generate a formatted review report.
-
-    Args:
-        report: ReviewReport object
-        include_details: Whether to include detailed issue list
-
-    Returns:
-        Formatted report string
-    """
-    output = []
-    output.append("=" * 60)
-    output.append("CODE REVIEW REPORT")
-    output.append("=" * 60)
-    output.append(f"\nTimestamp: {report.timestamp.isoformat()}")
-    output.append(f"Files reviewed: {report.files_reviewed}")
-    output.append(f"Agents used: {', '.join(report.agents_used)}")
-
-    output.append("\n" + "-" * 40)
-    output.append("SUMMARY")
-    output.append("-" * 40)
-    output.append(f"Total issues: {report.summary.total_issues}")
-    output.append(f"  Critical: {report.summary.critical}")
-    output.append(f"  High: {report.summary.high}")
-    output.append(f"  Medium: {report.summary.medium}")
-    output.append(f"  Low: {report.summary.low}")
-    output.append(f"Auto-fixable: {report.summary.auto_fixed}")
-
-    if include_details and report.details:
-        output.append("\n" + "-" * 40)
-        output.append("DETAILED ISSUES")
-        output.append("-" * 40)
-
-        # Group by file
-        by_file = {}
-        for issue in report.details:
-            if issue.file not in by_file:
-                by_file[issue.file] = []
-            by_file[issue.file].append(issue)
-
-        for file_path, issues in by_file.items():
-            output.append(f"\n{Path(file_path).name}:")
-            for issue in issues[:10]:  # Show first 10 per file
-                output.append(
-                    f"  [{issue.severity.value.upper():8}] "
-                    f"Line {issue.line or '?':>4}: {issue.message}"
-                )
-            if len(issues) > 10:
-                output.append(f"  ... and {len(issues) - 10} more issues")
-
-    return "\n".join(output)
+    return {
+        "summary": f"Processed {len(results)} agent results",
+        "total_issues": total_issues,
+        "critical_issues": critical_issues,
+        "fixed_issues": fixed_issues,
+        "actions_taken": actions_taken,
+        "success": critical_issues == 0,
+    }

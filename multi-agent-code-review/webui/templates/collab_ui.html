@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Coder - Collaboration View</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --border: #30363d;
+            --text-primary: #c9d1d9;
+            --text-secondary: #8b949e;
+            --accent-blue: #3b82f6;
+            --accent-green: #10b981;
+            --accent-purple: #a371f7;
+            --accent-orange: #f59e0b;
+            --accent-red: #ef4444;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            font-size: 13px;
+        }
+        
+        .header {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 600;
+            font-size: 16px;
+        }
+        
+        .logo-icon {
+            width: 28px;
+            height: 28px;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .main-container {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 320px 1fr 400px;
+            overflow: hidden;
+        }
+        
+        /* Collaboration Events Panel */
+        .collab-panel {
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .collab-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .collab-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px;
+        }
+        
+        .event-item {
+            padding: 8px 10px;
+            border-radius: 6px;
+            margin-bottom: 6px;
+            font-size: 12px;
+            background: var(--bg-tertiary);
+            animation: slideIn 0.3s ease;
+        }
+        
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        
+        .event-spawned { border-left: 3px solid var(--accent-green); }
+        .event-closed { border-left: 3px solid var(--accent-blue); }
+        .event-running { border-left: 3px solid var(--accent-orange); }
+        .event-completed { border-left: 3px solid var(--accent-green); }
+        .event-waiting { border-left: 3px solid var(--text-secondary); }
+        .event-error { border-left: 3px solid var(--accent-red); }
+        
+        .event-time {
+            font-size: 10px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+        
+        /* Chat/Workflow Panel */
+        .chat-panel {
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-primary);
+        }
+        
+        .chat-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-secondary);
+        }
+        
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+        }
+        
+        .message {
+            margin-bottom: 16px;
+        }
+        
+        .message-user {
+            text-align: right;
+        }
+        
+        .message-assistant {
+            text-align: left;
+        }
+        
+        .message-bubble {
+            display: inline-block;
+            padding: 12px 16px;
+            border-radius: 12px;
+            max-width: 90%;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+        }
+        
+        .message-user .message-bubble {
+            background: var(--accent-blue);
+            border-color: var(--accent-blue);
+        }
+        
+        .message-code {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 8px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .chat-input-area {
+            padding: 16px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border);
+        }
+        
+        .chat-input {
+            width: 100%;
+            padding: 12px 16px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 14px;
+        }
+        
+        .chat-input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+        
+        .send-btn {
+            margin-top: 8px;
+            padding: 10px 24px;
+            background: var(--accent-blue);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        
+        .send-btn:hover {
+            opacity: 0.9;
+        }
+        
+        .send-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        /* Code Panel */
+        .code-panel {
+            background: var(--bg-secondary);
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .code-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+            display: flex;
+            justify-content: space-between;
+        }
+        
+        .code-content {
+            flex: 1;
+            padding: 12px;
+            overflow-y: auto;
+        }
+        
+        .code-editor {
+            width: 100%;
+            height: 100%;
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+            color: var(--text-primary);
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 13px;
+            resize: none;
+        }
+        
+        /* Agent Pipeline */
+        .agent-pipeline {
+            display: flex;
+            gap: 4px;
+            padding: 8px 0;
+            margin-bottom: 12px;
+            overflow-x: auto;
+        }
+        
+        .pipeline-agent {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 8px 12px;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            min-width: 60px;
+        }
+        
+        .pipeline-agent.active {
+            background: var(--accent-blue);
+        }
+        
+        .pipeline-agent.completed {
+            background: var(--accent-green);
+        }
+        
+        .pipeline-icon {
+            font-size: 20px;
+            margin-bottom: 4px;
+        }
+        
+        .pipeline-name {
+            font-size: 10px;
+            font-weight: 600;
+        }
+        
+        /* Loading spinner */
+        .loading {
+            display: inline-block;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="logo">
+            <div class="logo-icon">🧠</div>
+            <span>AI Coder</span>
+        </div>
+        <div style="font-size: 12px; color: var(--text-secondary);">
+            Multi-Agent Collaboration
+        </div>
+    </div>
+    
+    <div class="main-container">
+        <!-- Collaboration Events Panel -->
+        <div class="collab-panel">
+            <div class="collab-header">
+                <span>✦ Collaboration Events</span>
+                <button onclick="clearEvents()" style="font-size: 10px; padding: 4px 8px; cursor: pointer;">Clear</button>
+            </div>
+            <div class="collab-content" id="events-container">
+                <div style="text-align: center; color: var(--text-secondary); padding: 40px 0;">
+                    No events yet
+                </div>
+            </div>
+        </div>
+        
+        <!-- Chat/Workspace Panel -->
+        <div class="chat-panel">
+            <div class="chat-header">
+                <div class="agent-pipeline" id="pipeline">
+                    <div class="pipeline-agent" data-agent="coordinator">
+                        <div class="pipeline-icon">🧠</div>
+                        <div class="pipeline-name">Alex</div>
+                    </div>
+                    <div class="pipeline-agent" data-agent="planner">
+                        <div class="pipeline-icon">📋</div>
+                        <div class="pipeline-name">Sam</div>
+                    </div>
+                    <div class="pipeline-agent" data-agent="coder">
+                        <div class="pipeline-icon">💻</div>
+                        <div class="pipeline-name">Codey</div>
+                    </div>
+                    <div class="pipeline-agent" data-agent="linter">
+                        <div class="pipeline-icon">📝</div>
+                        <div class="pipeline-name">Lint</div>
+                    </div>
+                    <div class="pipeline-agent" data-agent="reviewer">
+                        <div class="pipeline-icon">🔍</div>
+                        <div class="pipeline-name">Robie</div>
+                    </div>
+                    <div class="pipeline-agent" data-agent="fixer">
+                        <div class="pipeline-icon">🔧</div>
+                        <div class="pipeline-name">Fix</div>
+                    </div>
+                    <div class="pipeline-agent" data-agent="tester">
+                        <div class="pipeline-icon">🧪</div>
+                        <div class="pipeline-name">Testy</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="chat-messages" id="chat-messages">
+                <div class="message message-assistant">
+                    <div class="message-bubble">
+                        <strong>AI Coder Ready!</strong><br>
+                        Describe what you want to build.
+                    </div>
+                </div>
+            </div>
+            
+            <div class="chat-input-area">
+                <input type="text" class="chat-input" id="requirement-input" 
+                       placeholder="Create a calculator class...">
+                <button class="send-btn" id="send-btn" onclick="sendRequirement()">
+                    🚀 Build
+                </button>
+            </div>
+        </div>
+        
+        <!-- Code Panel -->
+        <div class="code-panel">
+            <div class="code-header">
+                <span>📄 Generated Code</span>
+                <button onclick="copyCode()" style="font-size: 11px; cursor: pointer;">📋 Copy</button>
+            </div>
+            <div class="code-content">
+                <textarea class="code-editor" id="code-editor" 
+                          placeholder="Generated code will appear here..."></textarea>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Event source for SSE
+        let eventSource = null;
+        
+        // Initialize SSE connection
+        function connectSSE() {
+            eventSource = new EventSource('/api/events/stream');
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                addEvent(data);
+                updatePipeline(data);
+            };
+            eventSource.onerror = function() {
+                // Reconnect after 2 seconds
+                setTimeout(connectSSE, 2000);
+            };
+        }
+        
+        // Add event to panel
+        function addEvent(event) {
+            const container = document.getElementById('events-container');
+            
+            // Remove placeholder if present
+            if (container.querySelector('div[style*="text-align"]')) {
+                container.innerHTML = '';
+            }
+            
+            const icons = {
+                'spawned': '✦',
+                'closed': '✓',
+                'running': '◐',
+                'completed': '✓',
+                'waiting': '⏳',
+                'error': '❌'
+            };
+            
+            const time = new Date(event.timestamp).toLocaleTimeString();
+            
+            const html = `
+                <div class="event-item event-${event.type}">
+                    ${icons[event.type] || '•'} <strong>${event.agent}</strong> [${event.role}]
+                    <br>${event.message}
+                    <div class="event-time">${time}</div>
+                </div>
+            `;
+            
+            container.insertAdjacentHTML('afterbegin', html);
+            
+            // Keep only last 50 events
+            const events = container.querySelectorAll('.event-item');
+            if (events.length > 50) {
+                events[events.length - 1].remove();
+            }
+        }
+        
+        // Update pipeline visualization
+        function updatePipeline(event) {
+            const agentMap = {
+                'coordinator': 'Alex',
+                'planner': 'Sam',
+                'coder': 'Codey',
+                'linter': 'Lint',
+                'reviewer': 'Robie',
+                'fixer': 'Fix',
+                'tester': 'Testy'
+            };
+            
+            const role = event.role;
+            const pipelineItem = document.querySelector(`.pipeline-agent[data-agent="${role}"]`);
+            
+            if (pipelineItem) {
+                if (event.type === 'running') {
+                    pipelineItem.classList.add('active');
+                    pipelineItem.classList.remove('completed');
+                } else if (event.type === 'completed' || event.type === 'closed') {
+                    pipelineItem.classList.remove('active');
+                    pipelineItem.classList.add('completed');
+                }
+            }
+        }
+        
+        // Reset pipeline
+        function resetPipeline() {
+            document.querySelectorAll('.pipeline-agent').forEach(el => {
+                el.classList.remove('active', 'completed');
+            });
+        }
+        
+        // Clear events
+        function clearEvents() {
+            fetch('/api/events/clear', { method: 'POST' })
+                .then(() => {
+                    document.getElementById('events-container').innerHTML = 
+                        '<div style="text-align: center; color: var(--text-secondary); padding: 40px 0;">No events yet</div>';
+                    resetPipeline();
+                });
+        }
+        
+        // Send requirement
+        async function sendRequirement() {
+            const input = document.getElementById('requirement-input');
+            const btn = document.getElementById('send-btn');
+            const requirement = input.value.trim();
+            
+            if (!requirement) return;
+            
+            // Clear previous
+            clearEvents();
+            resetPipeline();
+            document.getElementById('chat-messages').innerHTML = '';
+            document.getElementById('code-editor').value = '';
+            
+            // Add user message
+            addMessage('user', requirement);
+            addMessage('assistant', '🚀 Starting multi-agent workflow...');
+            
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading">◐</span> Building...';
+            
+            try {
+                const response = await fetch('/api/workflow', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ requirement })
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    addMessage('assistant', '❌ Error: ' + data.error);
+                } else {
+                    // Show results
+                    const summary = `
+**✅ Development Complete**
+
+- **Status:** ${data.status}
+- **Steps:** ${data.stats.steps_completed}
+- **Duration:** ${data.stats.duration.toFixed(2)}s
+
+**Code Quality:**
+- Lint issues: ${data.context.lint_issues}
+- Review issues: ${data.context.review_issues}
+                    `;
+                    addMessage('assistant', summary);
+                    
+                    // Show code
+                    if (data.context.code) {
+                        document.getElementById('code-editor').value = data.context.code;
+                    }
+                }
+            } catch (err) {
+                addMessage('assistant', '❌ Error: ' + err);
+            }
+            
+            btn.disabled = false;
+            btn.innerHTML = '🚀 Build';
+        }
+        
+        // Add message to chat
+        function addMessage(role, content) {
+            const container = document.getElementById('chat-messages');
+            
+            let html = `<div class="message message-${role}"><div class="message-bubble">`;
+            
+            // Format markdown
+            content = content.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+            content = content.replace(/\n/g, '<br>');
+            
+            html += content + '</div></div>';
+            container.insertAdjacentHTML('beforeend', html);
+            container.scrollTop = container.scrollHeight;
+        }
+        
+        // Copy code
+        function copyCode() {
+            const code = document.getElementById('code-editor').value;
+            navigator.clipboard.writeText(code);
+            alert('Code copied!');
+        }
+        
+        // Enter key to send
+        document.getElementById('requirement-input').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') sendRequirement();
+        });
+        
+        // Connect to SSE on load
+        connectSSE();
+    </script>
+</body>
+</html>

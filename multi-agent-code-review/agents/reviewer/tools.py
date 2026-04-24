@@ -1,230 +1,187 @@
-"""Tools for Reviewer Agent."""
+"""Tools for the Reviewer Agent."""
 
 import ast
-from typing import List
+import re
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
-from tools.ast_analyzer import calculate_complexity
-from tools.security_scanner import scan_security_issues, run_bandit_scan
-from core.models import CodeIssue, Severity, IssueType, ReviewResult
+from core.context import CodeIssue, Severity
 
 
-def analyze_complexity(source: str, file_path: str = "") -> dict:
+@dataclass
+class ReviewResult:
+    """Result of code review."""
+    code: str
+    issues: List[CodeIssue] = field(default_factory=list)
+    score: int = 100  # 0-100
+    summary: str = ""
+
+
+def review_code(code: str) -> ReviewResult:
     """
-    Analyze code complexity.
+    Review code for issues.
 
     Args:
-        source: Python source code
-        file_path: Optional file path
+        code: Python code to review
 
     Returns:
-        Dictionary with complexity metrics
+        Review result with issues
     """
-    result = {
-        "file": file_path,
-        "functions": [],
-        "classes": [],
-        "max_complexity": 0,
-        "average_complexity": 0,
-        "issues": [],
-    }
+    result = ReviewResult(code=code)
+    result.issues = []
 
+    # Syntax check
     try:
-        tree = ast.parse(source)
+        ast.parse(code)
+    except SyntaxError as e:
+        result.issues.append(CodeIssue(
+            line=e.lineno,
+            severity=Severity.CRITICAL,
+            issue_type="syntax",
+            message=f"Syntax error: {e.msg}",
+            auto_fixable=False,
+        ))
+        result.score -= 50
+        return result
 
-        total_complexity = 0
-        count = 0
+    # Check for basic patterns
+    lines = code.split('\n')
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
-                complexity = calculate_complexity(node)
-                result["functions"].append({
-                    "name": node.name,
-                    "line": node.lineno,
-                    "complexity": complexity,
-                })
-                total_complexity += complexity
-                count += 1
-                result["max_complexity"] = max(result["max_complexity"], complexity)
-
-                if complexity > 10:
-                    result["issues"].append(
-                        CodeIssue(
-                            file=file_path,
-                            line=node.lineno,
-                            column=None,
-                            severity=Severity.MEDIUM,
-                            issue_type=IssueType.COMPLEXITY,
-                            message=f"Function '{node.name}' has high complexity ({complexity})",
-                            suggestion="Consider refactoring into smaller functions",
-                            auto_fixable=False,
-                            rule_id="C901",
-                        )
-                    )
-
-            elif isinstance(node, ast.ClassDef):
-                result["classes"].append({
-                    "name": node.name,
-                    "line": node.lineno,
-                    "methods": sum(1 for m in node.body if isinstance(m, ast.FunctionDef)),
-                })
-
-        if count > 0:
-            result["average_complexity"] = total_complexity / count
-
-    except SyntaxError:
-        result["issues"].append(
-            CodeIssue(
-                file=file_path,
-                line=1,
-                column=None,
-                severity=Severity.CRITICAL,
-                issue_type=IssueType.CORRECTNESS,
-                message="Syntax error preventing analysis",
-                suggestion="Fix syntax errors before analysis",
+    for i, line in enumerate(lines, 1):
+        # Check for TODO without error handling
+        if "TODO" in line or "FIXME" in line:
+            result.issues.append(CodeIssue(
+                line=i,
+                severity=Severity.MEDIUM,
+                issue_type="completeness",
+                message="TODO/FIXME found - needs implementation",
                 auto_fixable=False,
-                rule_id="E999",
-            )
-        )
+            ))
+            result.score -= 5
 
-    return result
+        # Check for print statements in functions
+        if re.match(r'\s*print\(', line) and 'def ' not in line:
+            # Only flag if not in main block
+            if i > len(lines) - 5:
+                result.issues.append(CodeIssue(
+                    line=i,
+                    severity=Severity.LOW,
+                    issue_type="style",
+                    message="Consider using logging instead of print",
+                    auto_fixable=False,
+                ))
+                result.score -= 2
 
+        # Check for bare except
+        if re.match(r'\s*except\s*:', line):
+            result.issues.append(CodeIssue(
+                line=i,
+                severity=Severity.HIGH,
+                issue_type="error_handling",
+                message="Bare except clause - catches all exceptions",
+                suggestion="Use 'except Exception as e:' instead",
+                auto_fixable=False,
+            ))
+            result.score -= 10
 
-def detect_security_issues(file_path: str) -> ReviewResult:
-    """
-    Detect security issues in Python code.
-
-    Args:
-        file_path: Path to the Python file
-
-    Returns:
-        ReviewResult with security issues
-    """
-    issues: List[CodeIssue] = []
-
-    # Run Bandit scanner
-    bandit_issues = run_bandit_scan(file_path)
-    issues.extend(bandit_issues)
-
-    # Also run our own checks
-    try:
-        with open(file_path, "r") as f:
-            source = f.read()
-        custom_issues = scan_security_issues(source, file_path)
-        issues.extend(custom_issues)
-    except Exception:
-        pass
-
-    summary = f"Found {len(issues)} security issues"
-    if issues:
-        high_severity = sum(1 for i in issues if i.severity == Severity.HIGH)
-        if high_severity > 0:
-            summary += f" ({high_severity} high severity)"
-
-    return ReviewResult(
-        agent="reviewer",
-        issues=issues,
-        summary=summary,
-        status="success" if issues else "success",
-    )
-
-
-def assess_maintainability(source: str, file_path: str = "") -> dict:
-    """
-    Assess code maintainability.
-
-    Args:
-        source: Python source code
-        file_path: Optional file path
-
-    Returns:
-        Dictionary with maintainability assessment
-    """
-    result = {
-        "file": file_path,
-        "score": 100,
-        "issues": [],
-        "recommendations": [],
-    }
-
-    lines = source.split("\n")
-
-    # Check line length
-    long_lines = sum(1 for line in lines if len(line) > 120)
-    if long_lines > 0:
-        result["score"] -= long_lines * 0.5
-        result["recommendations"].append(f"Consider breaking {long_lines} long lines (>120 chars)")
+        # Check for division without zero check
+        if '/' in line and 'divide' in code.lower():
+            # Check if there are zero checks nearby
+            context = '\n'.join(lines[max(0, i-3):i+3])
+            if 'zero' not in context.lower() and '== 0' not in context:
+                result.issues.append(CodeIssue(
+                    line=i,
+                    severity=Severity.HIGH,
+                    issue_type="logic",
+                    message="Potential division by zero - add validation",
+                    suggestion="Check divisor != 0 before dividing",
+                    auto_fixable=False,
+                ))
+                result.score -= 15
 
     # Check for missing docstrings
-    try:
-        tree = ast.parse(source)
-        public_funcs = [n for n in tree.body if isinstance(n, ast.FunctionDef) and not n.name.startswith("_")]
-        if len(public_funcs) > 5:
-            result["recommendations"].append("Consider adding module-level documentation")
-    except Exception:
-        pass
+    functions = re.findall(r'def\s+(\w+)\s*\(', code)
+    if functions:
+        for func in functions:
+            pattern = rf'def {func}\s*\([^)]*\):[^#]*"""[^"]*"""'
+            if not re.search(pattern, code):
+                result.issues.append(CodeIssue(
+                    line=1,
+                    severity=Severity.LOW,
+                    issue_type="documentation",
+                    message=f"Function '{func}' may be missing docstring",
+                    auto_fixable=False,
+                ))
+                result.score -= 3
 
-    # Check for TODO comments
-    todo_count = sum(1 for line in lines if "TODO" in line or "FIXME" in line)
-    if todo_count > 0:
-        result["recommendations"].append(f"Address {todo_count} TODO/FIXME comments")
+    # Ensure score doesn't go negative
+    result.score = max(0, result.score)
 
-    # Check for deep nesting
-    max_nesting = 0
-    for line in lines:
-        nesting = len(line) - len(line.lstrip())
-        max_nesting = max(max_nesting, nesting // 4)
+    # Generate summary
+    critical = len([i for i in result.issues if i.severity == Severity.CRITICAL])
+    high = len([i for i in result.issues if i.severity == Severity.HIGH])
+    medium = len([i for i in result.issues if i.severity == Severity.MEDIUM])
+    low = len([i for i in result.issues if i.severity == Severity.LOW])
 
-    if max_nesting > 4:
-        result["score"] -= (max_nesting - 4) * 2
-        result["recommendations"].append(f"Reduce deep nesting (max: {max_nesting} levels)")
-
-    result["score"] = max(0, min(100, result["score"]))
+    result.summary = f"Found {len(result.issues)} issues: {critical} critical, {high} high, {medium} medium, {low} low"
 
     return result
 
 
-def review_file(file_path: str) -> ReviewResult:
-    """
-    Perform full code review on a file.
+def check_security(code: str) -> List[CodeIssue]:
+    """Check for security issues."""
+    issues = []
+    lines = code.split('\n')
 
-    Args:
-        file_path: Path to the Python file
+    for i, line in enumerate(lines, 1):
+        # Check for hardcoded secrets
+        if any(kw in line.lower() for kw in ['password', 'secret', 'api_key', 'token']):
+            if '=' in line and not line.strip().startswith('#'):
+                issues.append(CodeIssue(
+                    line=i,
+                    severity=Severity.CRITICAL,
+                    issue_type="security",
+                    message="Potential hardcoded secret detected",
+                    suggestion="Use environment variables instead",
+                    auto_fixable=False,
+                ))
 
-    Returns:
-        ReviewResult with all issues found
-    """
-    issues: List[CodeIssue] = []
+        # Check for SQL injection risk
+        if 'execute' in line and 'f"' in line or 'execute' in line and '%' in line:
+            issues.append(CodeIssue(
+                line=i,
+                severity=Severity.CRITICAL,
+                issue_type="security",
+                message="Potential SQL injection vulnerability",
+                suggestion="Use parameterized queries",
+                auto_fixable=False,
+            ))
 
-    # Read the file
-    try:
-        with open(file_path, "r") as f:
-            source = f.read()
-    except Exception as e:
-        return ReviewResult(
-            agent="reviewer",
-            issues=[],
-            summary=f"Error reading file: {e}",
-            status="error",
-        )
+    return issues
 
-    # Complexity analysis
-    complexity_result = analyze_complexity(source, file_path)
-    issues.extend(complexity_result.get("issues", []))
 
-    # Security scan
-    security_result = detect_security_issues(file_path)
-    issues.extend(security_result.issues)
+def format_review_report(result: ReviewResult) -> str:
+    """Format review result as a readable report."""
+    output = f"## Code Review Report\n\n"
+    output += f"**Score:** {result.score}/100\n"
+    output += f"**Issues:** {len(result.issues)}\n\n"
 
-    # Maintainability assessment
-    maintain_result = assess_maintainability(source, file_path)
+    if result.issues:
+        # Group by severity
+        by_severity = {}
+        for issue in result.issues:
+            sev = issue.severity.value
+            if sev not in by_severity:
+                by_severity[sev] = []
+            by_severity[sev].append(issue)
 
-    summary = f"Review found {len(issues)} issues"
-    if maintain_result["score"] < 80:
-        summary += f" | Maintainability score: {maintain_result['score']:.0f}/100"
+        for severity in ['critical', 'high', 'medium', 'low']:
+            if severity in by_severity:
+                output += f"### {severity.upper()}\n"
+                for issue in by_severity[severity]:
+                    output += f"- Line {issue.line}: {issue.message}\n"
+                    if issue.suggestion:
+                        output += f"  - Suggestion: {issue.suggestion}\n"
+                output += "\n"
 
-    return ReviewResult(
-        agent="reviewer",
-        issues=issues,
-        summary=summary,
-        status="success",
-    )
+    return output

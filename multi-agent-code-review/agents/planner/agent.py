@@ -1,67 +1,104 @@
-"""Planner Agent - Project planning and task decomposition."""
+"""Planner Agent - Creates implementation plans."""
 
 from __future__ import annotations
-from typing import Optional, Dict, List, Any
 
-from agent_framework.ollama import OllamaChatClient
+from typing import Optional
 
-from agents.base import BaseAgent, AgentConfig, AgentType
+from agents.base import AgentConfig, AgentType, BaseAgent
+from core.context import WorkflowContext
 
-
-PLANNER_INSTRUCTIONS = """You are the Planner Agent in the Multi-Agent Development System.
-
-Your role is to break down user requirements into clear, actionable implementation steps.
-
-## When Given a Requirement:
-
-1. **Understand the Goal** - What does the user want to build?
-2. **Identify Components** - What files, modules, classes are needed?
-3. **Create Step-by-Step Plan** - Numbered steps in execution order
-4. **Consider Dependencies** - What must happen first?
-5. **Estimate Complexity** - How difficult is each step?
-
-## Output Format
-
-### Analysis
-[Brief understanding of what needs to be built]
-
-### Plan
-1. [Step 1 - clear action]
-2. [Step 2 - clear action]
-3. ...
-
-### Files to Create
-- `filename1.py` - [purpose]
-- `filename2.py` - [purpose]
-
-### Dependencies
-- [External libraries or systems needed]
-
-### Estimated Complexity
-- Low / Medium / High
-
-Be practical. Focus on the minimum viable approach.
-Do not over-engineer. Start simple, add complexity only if needed."""
+from .prompts import PLANNER_PROMPT
+from .tools import ImplementationPlan, create_plan, estimate_effort
 
 
-def create_planner_agent(
-    client: Optional[OllamaChatClient] = None,
-    model: str = "llama3.2"
-) -> BaseAgent:
-    """Create a Planner agent."""
-    config = AgentConfig(
-        name="Planner",
-        role="Project planning and task decomposition",
-        instructions=PLANNER_INSTRUCTIONS,
-        agent_type=AgentType.PLANNER,
-        tools=["file_search"],
-    )
-    return BaseAgent(config, client)
+class PlannerAgent(BaseAgent):
+    """
+    Planner Agent - creates detailed implementation plans.
+
+    Responsibilities:
+    - Analyze requirements
+    - Create step-by-step plans
+    - Estimate complexity and effort
+    - Output structured plans
+    """
+
+    def __init__(self, config: Optional[AgentConfig] = None):
+        if config is None:
+            config = AgentConfig(
+                name="Planner",
+                role="planner",
+                instructions=PLANNER_PROMPT,
+                agent_type=AgentType.PLANNER,
+                model="llama3.2",
+            )
+        super().__init__(config)
+
+    def plan(self, requirement: str) -> ImplementationPlan:
+        """
+        Create an implementation plan.
+
+        Args:
+            requirement: User requirement
+
+        Returns:
+            Implementation plan
+        """
+        return create_plan(requirement)
+
+    def get_effort(self, plan: ImplementationPlan) -> dict:
+        """Get effort estimation for a plan."""
+        return estimate_effort(plan)
+
+    def format_plan(self, plan: ImplementationPlan) -> str:
+        """Format plan as a readable string."""
+        output = f"# Implementation Plan\n\n"
+        output += f"## Overview\n{plan.overview}\n\n"
+        output += f"## Steps\n"
+        for step in plan.steps:
+            output += f"{step.step_number}. **{step.name}**\n"
+            output += f"   - {step.description}\n"
+            output += f"   - Complexity: {step.complexity}/5\n"
+            output += f"   - Est. Lines: {step.estimated_lines}\n"
+        output += f"\n## Files\n"
+        for f in plan.files:
+            output += f"- {f}\n"
+        output += f"\n## Effort: {plan.estimated_effort}\n"
+        return output
+
+    async def run(self, prompt: str, context: Optional[WorkflowContext] = None) -> str:
+        """
+        Run planner with a requirement.
+
+        Args:
+            prompt: User requirement
+            context: Optional workflow context
+
+        Returns:
+            Formatted implementation plan
+        """
+        # Get requirement from context if available
+        if context and context.requirement:
+            requirement = context.requirement
+        else:
+            requirement = prompt
+
+        plan = self.plan(requirement)
+        return self.format_plan(plan)
 
 
-def get_planner_agent(
-    client: Optional[OllamaChatClient] = None,
-    model: str = "llama3.2"
-) -> BaseAgent:
-    """Get or create Planner agent."""
-    return create_planner_agent(client, model)
+# Factory function
+def create_planner_agent() -> PlannerAgent:
+    """Create a planner agent."""
+    return PlannerAgent()
+
+
+# Lazy singleton
+_planner_agent: Optional[PlannerAgent] = None
+
+
+def get_planner_agent() -> PlannerAgent:
+    """Get or create the planner agent."""
+    global _planner_agent
+    if _planner_agent is None:
+        _planner_agent = PlannerAgent()
+    return _planner_agent

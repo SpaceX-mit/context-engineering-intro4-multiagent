@@ -1,338 +1,261 @@
-"""FastAPI backend for the multi-agent code review system."""
+"""API for AI Coder with Collaboration Events Support."""
 
-import os
-from typing import Optional
-from contextlib import asynccontextmanager
+from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+import asyncio
+import json
+import threading
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
-from agents import get_agent
-from agents.planner import planner_agent
-from agents.coder import coder_agent
-from agents.reviewer import reviewer_agent
-from agents.linter import linter_agent
-from agents.security import security_agent
-from agents.orchestrator import SequentialBuilder, WorkflowBuilder
-from agents.orchestrator.builder import ConcurrentBuilder
-from agents.orchestrator.magical import MagenticBuilder
-from models import CodeFile, ReviewResult, ReviewReport
-from tools.code_analysis import analyze_code_structure, parse_python_ast
-from tools.security import security_scan
+app = Flask(__name__)
+CORS(app)
 
 
-# Global agent instances (lazy initialization)
-agents = {}
+class EventType(Enum):
+    """Collaboration event types based on Codex."""
+    AGENT_SPAWNED = "agent_spawned"
+    AGENT_CLOSED = "agent_closed"
+    AGENT_STATUS_CHANGED = "agent_status_changed"
+    AGENT_MESSAGE = "agent_message"
+    WORKFLOW_PROGRESS = "workflow_progress"
+    TOOL_OUTPUT = "tool_output"
+    ERROR = "error"
 
 
-def get_agent_instance(agent_type: str):
-    """Get or create an agent instance."""
-    if agent_type not in agents:
-        agents[agent_type] = get_agent(agent_type)
-    return agents[agent_type]
+@dataclass
+class CollaborationEvent:
+    """A collaboration event between agents."""
+    event_type: EventType
+    timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+    agent_nickname: Optional[str] = None
+    agent_role: Optional[str] = None
+    message: str = ""
+    data: Dict[str, Any] = field(default_factory=dict)
+    model: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "event_type": self.event_type.value,
+            "timestamp": self.timestamp,
+            "agent_nickname": self.agent_nickname,
+            "agent_role": self.agent_role,
+            "message": self.message,
+            "data": self.data,
+            "model": self.model,
+        }
+
+    def to_display(self) -> str:
+        """Format for display."""
+        icon = {
+            EventType.AGENT_SPAWNED: "✦",
+            EventType.AGENT_CLOSED: "✓",
+            EventType.AGENT_STATUS_CHANGED: "→",
+            EventType.AGENT_MESSAGE: "💬",
+            EventType.WORKFLOW_PROGRESS: "📋",
+            EventType.TOOL_OUTPUT: "⚙️",
+            EventType.ERROR: "❌",
+        }.get(self.event_type, "•")
+
+        agent = ""
+        if self.agent_nickname:
+            agent = f"**{self.agent_nickname}**"
+            if self.agent_role:
+                agent += f" [{self.agent_role}]"
+
+        return f"{icon} {agent} {self.message}"
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Lifespan context manager for startup/shutdown."""
-    # Initialize agents on startup (lazy)
-    yield
-    # Cleanup on shutdown
-    agents.clear()
+class EventEmitter:
+    """Simple event emitter for collaboration events."""
+
+    def __init__(self):
+        self._listeners: Dict[EventType, List[Callable]] = {}
+        self._events: List[CollaborationEvent] = []
+        self._max_events = 100
+        self._lock = threading.Lock()
+
+    def on(self, event_type: EventType, callback: Callable):
+        """Register an event listener."""
+        if event_type not in self._listeners:
+            self._listeners[event_type] = []
+        self._listeners[event_type].append(callback)
+
+    def emit(self, event: CollaborationEvent):
+        """Emit an event."""
+        with self._lock:
+            self._events.append(event)
+            if len(self._events) > self._max_events:
+                self._events = self._events[-self._max_events:]
+
+        # Notify listeners
+        listeners = self._listeners.get(event.event_type, [])
+        for listener in listeners:
+            try:
+                listener(event)
+            except Exception:
+                pass
+
+    def get_events(
+        self,
+        event_type: Optional[EventType] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """Get recent events."""
+        with self._lock:
+            events = self._events
+            if event_type:
+                events = [e for e in events if e.event_type == event_type]
+            return [e.to_dict() for e in events[-limit:]]
+
+    def clear(self):
+        """Clear all events."""
+        with self._lock:
+            self._events.clear()
 
 
-# Create FastAPI app
-app = FastAPI(
-    title="Multi-Agent Code Review API",
-    description="API for multi-agent code review and development system",
-    version="1.0.0",
-    lifespan=lifespan,
-)
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Global event emitter
+_event_emitter = EventEmitter()
 
 
-# Request/Response models
-class AnalyzeRequest(BaseModel):
-    """Request model for code analysis."""
-    code: str = Field(..., description="Source code to analyze")
-    file_path: Optional[str] = Field(None, description="File path if available")
-    language: Optional[str] = Field(None, description="Programming language")
+def get_event_emitter() -> EventEmitter:
+    """Get the global event emitter."""
+    return _event_emitter
 
 
-class ReviewRequest(BaseModel):
-    """Request model for code review."""
-    code: str = Field(..., description="Source code to review")
-    file_path: Optional[str] = Field(None, description="File path")
-    language: str = Field(default="python", description="Programming language")
-    review_type: str = Field(default="full", description="Type: full, security, style, correctness")
+def emit_spawn(agent_nickname: str, agent_role: str, model: str = "llama3.2"):
+    """Emit agent spawn event."""
+    event = CollaborationEvent(
+        event_type=EventType.AGENT_SPAWNED,
+        agent_nickname=agent_nickname,
+        agent_role=agent_role,
+        message=f"Spawned agent",
+        model=model,
+    )
+    _event_emitter.emit(event)
 
 
-class GenerateRequest(BaseModel):
-    """Request model for code generation."""
-    description: str = Field(..., description="Description of code to generate")
-    language: str = Field(default="python", description="Target language")
-    context: Optional[str] = Field(None, description="Additional context")
+def emit_close(agent_nickname: str, agent_role: str, status: str = "Completed"):
+    """Emit agent close event."""
+    event = CollaborationEvent(
+        event_type=EventType.AGENT_CLOSED,
+        agent_nickname=agent_nickname,
+        agent_role=agent_role,
+        message=f"Closed - {status}",
+    )
+    _event_emitter.emit(event)
 
 
-class FixRequest(BaseModel):
-    """Request model for code fixing."""
-    code: str = Field(..., description="Code with issues")
-    issues: list = Field(..., description="List of issues to fix")
-    language: str = Field(default="python", description="Programming language")
+def emit_interaction(
+    sender: str,
+    receiver: str,
+    sender_role: str = "",
+    receiver_role: str = "",
+):
+    """Emit agent interaction event."""
+    event = CollaborationEvent(
+        event_type=EventType.AGENT_MESSAGE,
+        agent_nickname=sender,
+        agent_role=sender_role,
+        message=f"Sent input to: **{receiver}**",
+        data={"receiver": receiver, "receiver_role": receiver_role},
+    )
+    _event_emitter.emit(event)
 
 
-class AgentResponse(BaseModel):
-    """Generic agent response."""
-    success: bool
-    result: Optional[dict] = None
-    error: Optional[str] = None
-    agent_type: Optional[str] = None
+def emit_progress(agent: str, step: str, status: str, progress: int):
+    """Emit workflow progress event."""
+    event = CollaborationEvent(
+        event_type=EventType.WORKFLOW_PROGRESS,
+        agent_nickname=agent,
+        message=f"{step}: {status}",
+        data={"progress": progress, "step": step, "status": status},
+    )
+    _event_emitter.emit(event)
+
+
+def emit_error(message: str, agent: Optional[str] = None):
+    """Emit error event."""
+    event = CollaborationEvent(
+        event_type=EventType.ERROR,
+        agent_nickname=agent,
+        message=message,
+    )
+    _event_emitter.emit(event)
 
 
 # API Routes
-@app.get("/")
-async def root():
-    """Root endpoint."""
-    return {"message": "Multi-Agent Code Review API", "version": "1.0.0"}
+@app.route('/api/events', methods=['GET'])
+def get_events():
+    """Get recent collaboration events."""
+    event_type = request.args.get('type')
+    limit = int(request.args.get('limit', 50))
+
+    et = None
+    if event_type:
+        try:
+            et = EventType(event_type)
+        except ValueError:
+            return jsonify({"error": "Invalid event type"}), 400
+
+    events = _event_emitter.get_events(et, limit)
+    return jsonify({"events": events})
 
 
-@app.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    return {"status": "healthy", "agents": list(agents.keys())}
+@app.route('/api/events/clear', methods=['POST'])
+def clear_events():
+    """Clear all events."""
+    _event_emitter.clear()
+    return jsonify({"success": True})
 
 
-@app.post("/api/analyze", response_model=AgentResponse)
-async def analyze_code(request: AnalyzeRequest):
-    """Analyze code structure and complexity."""
-    try:
-        result = analyze_code_structure(request.code, request.language or "python")
-        return AgentResponse(success=True, result=result, agent_type="analyzer")
-    except Exception as e:
-        return AgentResponse(success=False, error=str(e), agent_type="analyzer")
-
-
-@app.post("/api/review", response_model=AgentResponse)
-async def review_code(request: ReviewRequest):
-    """Review code for issues."""
-    try:
-        agent = get_agent_instance("reviewer")
-
-        # Build review prompt
-        prompt = f"""
-Review the following {request.language} code{' at ' + request.file_path if request.file_path else ''}.
-
-Focus on: {request.review_type}
-
-```python
-{request.code}
-```
-"""
-
-        result = await agent.run(prompt)
-
-        return AgentResponse(
-            success=True,
-            result={"review": result.output if hasattr(result, "output") else str(result)},
-            agent_type="reviewer"
-        )
-    except Exception as e:
-        return AgentResponse(success=False, error=str(e), agent_type="reviewer")
-
-
-@app.post("/api/generate", response_model=AgentResponse)
-async def generate_code(request: GenerateRequest):
-    """Generate code based on description."""
-    try:
-        agent = get_agent_instance("coder")
-
-        prompt = f"""
-Generate {request.language} code based on this description:
-
-{request.description}
-
-{f"Context:\n{request.context}" if request.context else ""}
-"""
-
-        result = await agent.run(prompt)
-
-        return AgentResponse(
-            success=True,
-            result={"code": result.output if hasattr(result, "output") else str(result)},
-            agent_type="coder"
-        )
-    except Exception as e:
-        return AgentResponse(success=False, error=str(e), agent_type="coder")
-
-
-@app.post("/api/fix", response_model=AgentResponse)
-async def fix_code(request: FixRequest):
-    """Fix code issues."""
-    try:
-        agent = get_agent_instance("coder")
-
-        issues_text = "\n".join([f"- {issue.get('message', str(issue))}" for issue in request.issues])
-
-        prompt = f"""
-Fix the following {request.language} code based on these issues:
-
-Issues:
-{issues_text}
-
-```python
-{request.code}
-```
-"""
-
-        result = await agent.run(prompt)
-
-        return AgentResponse(
-            success=True,
-            result={"fixed_code": result.output if hasattr(result, "output") else str(result)},
-            agent_type="coder"
-        )
-    except Exception as e:
-        return AgentResponse(success=False, error=str(e), agent_type="coder")
-
-
-@app.post("/api/security-scan", response_model=AgentResponse)
-async def security_scan_endpoint(request: AnalyzeRequest):
-    """Scan code for security issues."""
-    try:
-        result = security_scan(request.code, request.language or "python")
-        return AgentResponse(
-            success=True,
-            result={"security_issues": result},
-            agent_type="security"
-        )
-    except Exception as e:
-        return AgentResponse(success=False, error=str(e), agent_type="security")
-
-
-@app.post("/api/lint", response_model=AgentResponse)
-async def lint_code(request: AnalyzeRequest):
-    """Lint code for style issues."""
-    try:
-        agent = get_agent_instance("linter")
-
-        prompt = f"""
-Lint the following {request.language} code and report style issues:
-
-```python
-{request.code}
-```
-"""
-
-        result = await agent.run(prompt)
-
-        return AgentResponse(
-            success=True,
-            result={"lint_results": result.output if hasattr(result, "output") else str(result)},
-            agent_type="linter"
-        )
-    except Exception as e:
-        return AgentResponse(success=False, error=str(e), agent_type="linter")
-
-
-@app.get("/api/agents")
-async def list_agents():
-    """List available agents."""
-    return {
+@app.route('/api/agents/status', methods=['GET'])
+def get_agents_status():
+    """Get current agent statuses."""
+    return jsonify({
         "agents": [
-            {"name": "planner", "description": "Task planning and decomposition"},
-            {"name": "coder", "description": "Code generation and fixing"},
-            {"name": "reviewer", "description": "Code review and quality checking"},
-            {"name": "linter", "description": "Code style and formatting"},
-            {"name": "security", "description": "Security vulnerability detection"},
+            {"name": "Coordinator", "role": "coordinator", "status": "ready"},
+            {"name": "Planner", "role": "planner", "status": "ready"},
+            {"name": "Coder", "role": "coder", "status": "ready"},
+            {"name": "Linter", "role": "linter", "status": "ready"},
+            {"name": "Reviewer", "role": "reviewer", "status": "ready"},
+            {"name": "Fixer", "role": "fixer", "status": "ready"},
+            {"name": "Tester", "role": "tester", "status": "ready"},
         ]
-    }
+    })
 
 
-@app.post("/api/workflow/sequential")
-async def run_sequential_workflow(code: str = "", file_path: str = None):
-    """Run sequential workflow: plan -> code -> review."""
-    try:
-        builder = SequentialBuilder()
-        workflow = builder.build()
+# SSE endpoint for real-time events
+@app.route('/api/events/stream')
+def event_stream():
+    """Server-Sent Events stream for real-time updates."""
+    def generate():
+        import time
+        client_events = set()
 
-        context = {"code": code, "file_path": file_path}
-        result = await workflow.execute(context)
+        while True:
+            events = _event_emitter.get_events(limit=10)
+            for event in events:
+                event_id = f"{event['timestamp']}:{event['event_type']}"
+                if event_id not in client_events:
+                    client_events.add(event_id)
+                    yield f"data: {json.dumps(event)}\n\n"
+            time.sleep(0.5)
 
-        return {"success": True, "result": result}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-@app.post("/api/workflow/concurrent")
-async def run_concurrent_workflow(tasks: list):
-    """Run concurrent workflow: execute multiple tasks in parallel."""
-    try:
-        builder = ConcurrentBuilder()
-        workflow = builder.build()
-
-        result = await workflow.execute(tasks)
-
-        return {"success": True, "result": result}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-@app.post("/api/workflow/full")
-async def run_full_workflow(code: str = "", file_path: str = None):
-    """Run full workflow: plan -> code -> review -> lint -> security."""
-    try:
-        builder = WorkflowBuilder()
-        workflow = builder.build()
-
-        context = {"code": code, "file_path": file_path}
-        result = await workflow.execute(context)
-
-        return {"success": True, "result": result}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-# File upload endpoint
-@app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
-    """Upload and analyze a code file."""
-    try:
-        content = await file.read()
-        code = content.decode("utf-8")
-
-        # Detect language from extension
-        ext = os.path.splitext(file.filename)[1].lower()
-        lang_map = {
-            ".py": "python",
-            ".js": "javascript",
-            ".ts": "typescript",
-            ".go": "go",
-            ".rs": "rust",
+    from flask import Response
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
         }
-        language = lang_map.get(ext, "python")
-
-        # Analyze the code
-        result = analyze_code_structure(code, language)
-
-        return {
-            "success": True,
-            "filename": file.filename,
-            "language": language,
-            "analysis": result
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    )
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)

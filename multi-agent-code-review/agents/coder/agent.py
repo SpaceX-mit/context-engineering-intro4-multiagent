@@ -1,87 +1,113 @@
-"""Coder Agent - Code generation and implementation."""
+"""Coder Agent - Generates code implementations."""
 
 from __future__ import annotations
-from typing import Optional, Tuple
 
-from agent_framework.ollama import OllamaChatClient
+from typing import Any, Dict, Optional
 
-from agents.base import BaseAgent, AgentConfig, AgentType
+from agents.base import AgentConfig, AgentType, BaseAgent
+from core.context import WorkflowContext
 
-
-CODER_INSTRUCTIONS = '''You are the Coder Agent in the Multi-Agent Development System.
-
-Your role is to write clean, working Python code that fulfills requirements.
-
-## When Given a Task:
-
-1. Understand the Spec - What needs to be built?
-2. Write Complete Code - Full implementation, not snippets
-3. Follow Best Practices - Type hints, docstrings, error handling
-4. Execute and Verify - Run the code to ensure it works
-5. Present Results - Show code and output
-
-## Code Format
-
-Write Python code in markdown blocks like this:
-"""python
-# filename.py
-"""Module docstring."""
-
-class ClassName:
-    """Class docstring."""
-
-    def method(self, param: str) -> str:
-        """Method docstring."""
-        return param
-"""
-
-## Execution
-
-Always execute code to verify it works. Show:
-1. The code written
-2. Output from running it
-
-## Quality Standards
-
-- Use type hints on all functions
-- Add docstrings for classes and public methods
-- Handle errors gracefully
-- Keep functions small and focused
-- Use clear variable names
-
-Be productive. Write code that works.'''
+from .prompts import CODER_PROMPT
+from .tools import generate_code, validate_code
 
 
-def create_coder_agent(
-    client: Optional[OllamaChatClient] = None,
-    model: str = "llama3.2"
-) -> BaseAgent:
-    """Create a Coder agent."""
-    config = AgentConfig(
-        name="Coder",
-        role="Code generation and implementation",
-        instructions=CODER_INSTRUCTIONS,
-        agent_type=AgentType.CODER,
-        tools=["code_runner", "shell", "file_search"],
-    )
-    return BaseAgent(config, client)
+class CoderAgent(BaseAgent):
+    """
+    Coder Agent - generates code implementations.
+
+    Responsibilities:
+    - Generate code from requirements/plans
+    - Validate code syntax
+    - Write code to files
+    - Handle basic error cases
+    """
+
+    def __init__(self, config: Optional[AgentConfig] = None):
+        if config is None:
+            config = AgentConfig(
+                name="Coder",
+                role="coder",
+                instructions=CODER_PROMPT,
+                agent_type=AgentType.CODER,
+                model="llama3.2",
+            )
+        super().__init__(config)
+        self._last_code: Optional[str] = None
+
+    def implement(
+        self,
+        requirement: str,
+        plan: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        Implement code based on requirement.
+
+        Args:
+            requirement: User requirement
+            plan: Optional implementation plan
+
+        Returns:
+            Generated code
+        """
+        code = generate_code(requirement, plan)
+        self._last_code = code
+
+        # Validate
+        validation = validate_code(code)
+        if not validation["valid"]:
+            raise ValueError(f"Code validation failed: {validation['issues']}")
+
+        return code
+
+    def get_last_code(self) -> Optional[str]:
+        """Get the last generated code."""
+        return self._last_code
+
+    def format_code(self, code: str) -> str:
+        """Format code for display."""
+        return f"```python\n{code}\n```"
+
+    async def run(self, prompt: str, context: Optional[WorkflowContext] = None) -> str:
+        """
+        Run coder with a requirement.
+
+        Args:
+            prompt: User requirement or plan
+            context: Optional workflow context
+
+        Returns:
+            Generated code
+        """
+        # Get requirement from context if available
+        if context and context.plan:
+            requirement = context.plan
+        elif context and context.requirement:
+            requirement = context.requirement
+        else:
+            requirement = prompt
+
+        code = self.implement(requirement)
+
+        output = f"## Generated Code\n\n"
+        output += self.format_code(code)
+        output += "\n\n**Validation:** Passed\n"
+
+        return output
 
 
-def get_coder_agent(
-    client: Optional[OllamaChatClient] = None,
-    model: str = "llama3.2"
-) -> BaseAgent:
-    """Get or create Coder agent."""
-    return create_coder_agent(client, model)
+# Factory function
+def create_coder_agent() -> CoderAgent:
+    """Create a coder agent."""
+    return CoderAgent()
 
 
-async def write_code(agent: BaseAgent, spec: str) -> Tuple[str, str]:
-    """Helper to write code from a spec."""
-    response = await agent.run(f"Write Python code for: {spec}")
+# Lazy singleton
+_coder_agent: Optional[CoderAgent] = None
 
-    # Extract code from markdown
-    import re
-    code_match = re.search(r"```python\n(.*?)```", response, re.DOTALL)
-    code = code_match.group(1).strip() if code_match else ""
 
-    return code, response
+def get_coder_agent() -> CoderAgent:
+    """Get or create the coder agent."""
+    global _coder_agent
+    if _coder_agent is None:
+        _coder_agent = CoderAgent()
+    return _coder_agent

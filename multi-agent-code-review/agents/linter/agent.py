@@ -1,58 +1,81 @@
-"""Linter Agent - Code style checking and formatting."""
+"""Linter Agent - Checks code style."""
 
 from __future__ import annotations
-from typing import Optional
+from typing import List, Optional
 
-from agent_framework.ollama import OllamaChatClient
-
-from agents.base import BaseAgent, AgentConfig, AgentType
-
-
-LINTER_INSTRUCTIONS = '''You are the Linter Agent in the Multi-Agent Development System.
-
-Your role is to check code for style issues, formatting, and auto-fixable problems.
-
-## When Given Code to Lint:
-
-1. Syntax Check - Is the code syntactically correct?
-2. Style Issues - PEP8 violations, naming conventions
-3. Formatting - Indentation, whitespace, line length
-4. Imports - Unused imports, missing imports
-5. Auto-fixable - What can be automatically fixed?
-
-## Output Format
-
-### Style Issues
-Line | Issue | Auto-fix
-23 | Line too long | Yes
-45 | Unused import | Yes
-
-### Summary
-- Issues found: N
-- Auto-fixable: N
-- Needs manual review: N
-
-Be precise. Provide exact line numbers and corrections.'''
+from agents.base import AgentConfig, AgentType, BaseAgent
+from core.context import CodeIssue, Severity, WorkflowContext
 
 
-def create_linter_agent(
-    client: Optional[OllamaChatClient] = None,
-    model: str = "llama3.2"
-) -> BaseAgent:
-    """Create a Linter agent."""
-    config = AgentConfig(
-        name="Linter",
-        role="Code style checking and formatting",
-        instructions=LINTER_INSTRUCTIONS,
-        agent_type=AgentType.LINTER,
-        tools=["linter", "file_search"],
-    )
-    return BaseAgent(config, client)
+class LinterAgent(BaseAgent):
+    """Linter Agent - checks code style and formatting."""
+
+    def __init__(self, config: Optional[AgentConfig] = None):
+        if config is None:
+            config = AgentConfig(
+                name="Linter",
+                role="linter",
+                instructions="Check code style and formatting",
+                agent_type=AgentType.LINTER,
+                model="llama3.2",
+            )
+        super().__init__(config)
+
+    def lint(self, code: str) -> List[CodeIssue]:
+        """Lint code and return issues."""
+        issues = []
+
+        # Check for common style issues
+        lines = code.split('\n')
+        for i, line in enumerate(lines, 1):
+            # Line too long
+            if len(line) > 100:
+                issues.append(CodeIssue(
+                    line=i,
+                    severity=Severity.LOW,
+                    issue_type="style",
+                    message="Line too long (>{100} chars)",
+                    auto_fixable=True,
+                ))
+
+            # Trailing whitespace
+            if line.rstrip() != line:
+                issues.append(CodeIssue(
+                    line=i,
+                    severity=Severity.LOW,
+                    issue_type="style",
+                    message="Trailing whitespace",
+                    auto_fixable=True,
+                ))
+
+            # Missing space after comma
+            if ', ' not in line and ',' in line and '(' in line:
+                if i > 0:
+                    issues.append(CodeIssue(
+                        line=i,
+                        severity=Severity.LOW,
+                        issue_type="style",
+                        message="Missing space after comma",
+                        auto_fixable=True,
+                    ))
+
+        return issues
+
+    async def run(self, prompt: str, context: Optional[WorkflowContext] = None) -> str:
+        code = context.code if context and context.code else prompt
+        issues = self.lint(code)
+        return f"## Linting Results\n\nFound {len(issues)} issues\n"
 
 
-def get_linter_agent(
-    client: Optional[OllamaChatClient] = None,
-    model: str = "llama3.2"
-) -> BaseAgent:
-    """Get or create Linter agent."""
-    return create_linter_agent(client, model)
+def create_linter_agent() -> LinterAgent:
+    return LinterAgent()
+
+
+_linter_agent: Optional[LinterAgent] = None
+
+
+def get_linter_agent() -> LinterAgent:
+    global _linter_agent
+    if _linter_agent is None:
+        _linter_agent = LinterAgent()
+    return _linter_agent
