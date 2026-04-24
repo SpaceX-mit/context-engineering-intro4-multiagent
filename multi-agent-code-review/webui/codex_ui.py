@@ -79,40 +79,56 @@ async def setup_orchestrator_handlers():
     """Set up workflow handlers with event emission."""
 
     async def planner_handler(step_input, context):
-        events.add("running", "Sam", "planner", "Creating plan...")
+        """Planner: receives requirement -> outputs plan"""
         requirement = step_input.data
         if isinstance(requirement, dict):
             requirement = requirement.get("requirement", str(requirement))
+
+        events.add("running", "Sam", "planner", f"📥 Input: {requirement[:40]}...")
         plan = get_planner_agent().plan(requirement)
-        events.add("completed", "Sam", "planner", f"Plan: {plan.overview[:50]}...")
+        events.add("completed", "Sam", "planner", f"📤 Output: {plan.overview[:50]}...")
         return plan.overview
 
     async def coder_handler(step_input, context):
-        events.add("running", "Codey", "coder", "Writing code...")
+        """Coder: receives plan from planner -> outputs code"""
+        # step_input.data is the plan from planner
+        plan_text = step_input.data
+        if isinstance(plan_text, dict):
+            plan_text = plan_text.get("plan", str(plan_text))
+
+        events.add("running", "Codey", "coder", f"📥 Input: {str(plan_text)[:40]}...")
+        # Coder uses the plan to generate code
         code = get_coder_agent().implement(context.requirement)
-        events.add("completed", "Codey", "coder", f"Generated {len(code.splitlines())} lines")
+        events.add("completed", "Codey", "coder", f"📤 Output: {len(code.splitlines())} lines generated")
         return code
 
     async def linter_handler(step_input, context):
-        events.add("running", "Lint", "linter", "Checking style...")
+        """Linter: receives code from coder -> outputs lint issues"""
+        # step_input.data is the code from coder
         code = step_input.data
         if isinstance(code, dict):
             code = code.get("code", str(code))
+
+        events.add("running", "Lint", "linter", f"📥 Input: {len(str(code).splitlines())} lines of code...")
         issues = get_linter_agent().lint(code)
-        events.add("completed", "Lint", "linter", f"Found {len(issues)} issues")
+        events.add("completed", "Lint", "linter", f"📤 Output: Found {len(issues)} issues")
         return issues
 
     async def reviewer_handler(step_input, context):
-        events.add("running", "Robie", "reviewer", "Reviewing quality...")
+        """Reviewer: receives code from coder -> outputs review issues"""
+        # step_input.data is the code from coder
         code = step_input.data
         if isinstance(code, dict):
             code = code.get("code", str(code))
+
+        events.add("running", "Robie", "reviewer", f"📥 Input: {len(str(code).splitlines())} lines of code...")
         result = get_reviewer_agent().review(code)
-        events.add("completed", "Robie", "reviewer", f"Score: {result.score}/100")
+        events.add("completed", "Robie", "reviewer", f"📤 Output: Score {result.score}/100")
         return result.issues
 
     async def fixer_handler(step_input, context):
-        events.add("running", "Fix", "fixer", "Applying fixes...")
+        """Fixer: receives code + issues -> outputs fixed code"""
+        # step_input.data contains {code, issues}
         data = step_input.data
         if isinstance(data, dict):
             code = data.get("code", "")
@@ -120,17 +136,22 @@ async def setup_orchestrator_handlers():
         else:
             code = context.code or ""
             all_issues = []
+
+        events.add("running", "Fix", "fixer", f"📥 Input: {len(code.splitlines())} lines + {len(all_issues)} issues...")
         fixed = get_fixer_agent().fix(code, all_issues)
-        events.add("completed", "Fix", "fixer", f"Applied {len(all_issues)} fixes")
+        events.add("completed", "Fix", "fixer", f"📤 Output: {len(fixed.splitlines())} lines fixed")
         return fixed
 
     async def tester_handler(step_input, context):
-        events.add("running", "Testy", "tester", "Generating tests...")
+        """Tester: receives fixed code -> outputs tests"""
+        # step_input.data is the fixed code
         code = step_input.data
         if isinstance(code, dict):
             code = code.get("fixed_code", str(code))
+
+        events.add("running", "Testy", "tester", f"📥 Input: {len(str(code).splitlines())} lines of code...")
         tests = get_tester_agent().generate_tests(code)
-        events.add("completed", "Testy", "tester", "Tests generated")
+        events.add("completed", "Testy", "tester", f"📤 Output: {len(tests.splitlines())} lines of tests")
         return tests
 
     orch.register_step_handler("planner", "plan", planner_handler)
