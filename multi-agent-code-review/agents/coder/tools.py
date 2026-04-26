@@ -83,8 +83,17 @@ if __name__ == "__main__":
         pass
 '''
 
+    # Build plan header if plan is provided
+    plan_header = ""
+    if plan:
+        plan_text = plan if isinstance(plan, str) else str(plan)
+        plan_header = f"# Plan:\n"
+        for line in plan_text.split("\n")[:20]:
+            plan_header += f"#   {line}\n"
+        plan_header += "#\n"
+
     # Default: simple script
-    return f'''# Script based on: {requirement}
+    return plan_header + f'''# Script based on: {requirement}
 # TODO: Implement
 
 def main():

@@ -69,6 +69,41 @@ class CollaborationEvents:
 
 events = CollaborationEvents()
 
+
+class WorkflowStepStream:
+    """Thread-safe queue for streaming workflow steps to SSE clients."""
+
+    def __init__(self):
+        self._steps: list = []
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+
+    def put(self, step: dict):
+        """Add a completed step and notify waiters."""
+        with self._condition:
+            self._steps.append(step)
+            self._condition.notify_all()
+
+    def get_since(self, index: int, timeout: float = 30.0) -> tuple:
+        """Wait for and return (steps_since_index, new_index, done_flag)."""
+        with self._condition:
+            if index >= len(self._steps):
+                self._condition.wait(timeout)
+            new_steps = self._steps[index:]
+            return new_steps, len(self._steps), any(s.get("_done") for s in new_steps)
+
+    def clear(self):
+        with self._condition:
+            self._steps.clear()
+            self._condition.notify_all()
+
+    def mark_done(self, final_code: str = "", execution_output: str = ""):
+        """Signal that the workflow is complete."""
+        self.put({"_done": True, "final_code": final_code, "execution_output": execution_output})
+
+
+step_stream = WorkflowStepStream()
+
 # ============================================================================
 # Workflow Orchestrator Setup
 # ============================================================================
@@ -98,7 +133,7 @@ async def setup_orchestrator_handlers():
 
         events.add("running", "Codey", "coder", f"📥 Input: {str(plan_text)[:40]}...")
         # Coder uses the plan to generate code
-        code = get_coder_agent().implement(context.requirement)
+        code = get_coder_agent().implement(context.requirement, plan=plan_text)
         events.add("completed", "Codey", "coder", f"📤 Output: {len(code.splitlines())} lines generated")
         return code
 
@@ -228,7 +263,8 @@ HTML_TEMPLATE = r'''
         }
 
         .chat-area {
-            width: 500px;
+            width: 350px;
+            min-width: 280px;
             background: var(--bg-secondary);
             border-right: 1px solid var(--border);
             display: flex;
@@ -322,7 +358,8 @@ HTML_TEMPLATE = r'''
 
         /* Collaboration Events Panel */
         .events-panel {
-            width: 220px;
+            width: 180px;
+            min-width: 140px;
             background: var(--bg-secondary);
             border-right: 1px solid var(--border);
             display: flex;
@@ -490,7 +527,8 @@ HTML_TEMPLATE = r'''
 
         /* Agent Workflow Panel */
         .workflow-panel {
-            flex: 1;
+            flex: 2;
+            min-width: 500px;
             display: flex;
             flex-direction: column;
             overflow: hidden;
@@ -617,7 +655,8 @@ HTML_TEMPLATE = r'''
 
         /* Right panel - Code output */
         .code-panel {
-            width: 400px;
+            width: 300px;
+            min-width: 250px;
             background: var(--bg-secondary);
             border-left: 1px solid var(--border);
             display: flex;
@@ -996,55 +1035,60 @@ HTML_TEMPLATE = r'''
             // Reset all agent statuses
             resetAgentStatuses();
 
+            // Clear previous workflow
+            document.getElementById('workflow-content').innerHTML = '';
+            workflowSteps = [];
+
             // Start pipeline animation
             animatePipeline();
 
-            try {
-                const response = await fetch('/generate_detailed', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        prompt: message,
-                        workflow: document.getElementById('workflow-select').value
-                    })
-                });
+            // POST to start workflow (fire and forget)
+            fetch('/generate_detailed', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    prompt: message,
+                    workflow: document.getElementById('workflow-select').value
+                })
+            }).catch(err => {
+                addMessage('assistant', '❌ Error: ' + err, 'System');
+            });
 
-                const data = await response.json();
+            // Listen to SSE stream for step-by-step rendering
+            const stepSource = new EventSource('/api/stream/steps');
+            let stepCount = 0;
 
-                if (data.error) {
-                    addMessage('assistant', '❌ Error: ' + data.error, 'System');
+            stepSource.onmessage = function(event) {
+                const step = JSON.parse(event.data);
+
+                if (step._done) {
+                    // Workflow complete
+                    stepSource.close();
+                    if (step.final_code) {
+                        document.getElementById('code-editor').value = step.final_code;
+                    }
+                    addMessage('assistant',
+                        `✅ Workflow completed!\n\n` +
+                        `Steps executed: ${stepCount}\n` +
+                        `Code lines: ${step.final_code ? step.final_code.split('\\n').length : 0}`,
+                        'System'
+                    );
                     return;
                 }
 
-                // Update agent statuses based on workflow steps
-                updateAgentStatuses(data.workflow_steps);
+                // Render this step immediately
+                stepCount++;
+                addWorkflowStep(step);
+                updateAgentCard(step.agent.toLowerCase(), 'completed', 100);
+                updatePipelineStep(step.agent.toLowerCase(), 'completed');
+            };
 
-                // Clear previous workflow
-                document.getElementById('workflow-content').innerHTML = '';
-                workflowSteps = [];
-
-                // Add workflow steps
-                for (const step of data.workflow_steps) {
-                    addWorkflowStep(step);
+            stepSource.onerror = function(err) {
+                stepSource.close();
+                if (stepCount === 0) {
+                    addMessage('assistant', '❌ Workflow stream error', 'System');
                 }
-
-                // Update final code
-                if (data.final_code) {
-                    document.getElementById('code-editor').value = data.final_code;
-                }
-
-                // Show summary
-                addMessage('assistant',
-                    `✅ Workflow completed!\n\n` +
-                    `Agents involved: ${data.stats.agents_count}\n` +
-                    `Steps executed: ${data.stats.steps_count}\n` +
-                    `Code lines: ${data.stats.code_lines}`,
-                    'System'
-                );
-
-            } catch (err) {
-                addMessage('assistant', '❌ Error: ' + err, 'System');
-            }
+            };
         }
 
         function addWorkflowStep(step) {
@@ -1292,6 +1336,18 @@ def generate_detailed():
         from agent_framework import Agent
         from agent_framework.ollama import OllamaChatClient
 
+        # Clear previous events and emit spawn events
+        events.clear()
+        for agent_name, agent_icon, agent_role in [
+            ("Coordinator", "🧠", "coordinator"),
+            ("Planner", "📋", "planner"),
+            ("Coder", "💻", "coder"),
+            ("Linter", "📝", "linter"),
+            ("Reviewer", "🔍", "reviewer"),
+            ("Tester", "🧪", "tester"),
+        ]:
+            events.add("spawned", agent_name, agent_role, "Ready")
+
         client = OllamaChatClient(model='llama3.2')
         workflow_steps = []
         final_code = ""
@@ -1316,6 +1372,9 @@ Output a brief task list (3-5 items max) for other agents to follow.'''
 
 Requirement: {requirement}
 
+Coordinator's task breakdown:
+{tasks}
+
 Output a numbered plan with: 1) Files to create 2) Implementation steps 3) Dependencies'''
             },
             'coder': {
@@ -1326,7 +1385,10 @@ Output a numbered plan with: 1) Files to create 2) Implementation steps 3) Depen
 
 Requirement: {requirement}
 
-Write clean Python code with type hints and docstrings. Output ONLY the code in a ```python``` block.'''
+Implementation Plan:
+{plan}
+
+Write clean Python code with type hints and docstrings based on the plan above. Output ONLY the code in a ```python``` block.'''
             },
             'linter': {
                 'name': 'Linter',
@@ -1376,9 +1438,11 @@ Provide the fixed code in a ```python``` block.'''
         coord_cfg = agents_config['coordinator']
         coord_prompt = coord_cfg['prompt'].format(requirement=prompt)
 
+        events.add("running", "Coordinator", "coordinator", f"Parsing: {prompt[:40]}...")
         coordinator = Agent(client=client, name=coord_cfg['name'],
                            instructions="You are the Coordinator. Be concise.")
         coord_result = await coordinator.run(coord_prompt)
+        events.add("completed", "Coordinator", "coordinator", "Task decomposition done")
         coord_output = coord_result.text if hasattr(coord_result, 'text') else str(coord_result)
 
         workflow_steps.append({
@@ -1391,16 +1455,19 @@ Provide the fixed code in a ```python``` block.'''
             'output': coord_output[:500] + '...' if len(coord_output) > 500 else coord_output,
             'code': None
         })
+        step_stream.put(workflow_steps[-1])
         step_num += 1
 
         # Step 2: Planner
         plan_cfg = agents_config['planner']
-        plan_prompt = plan_cfg['prompt'].format(requirement=prompt)
+        plan_prompt = plan_cfg['prompt'].format(requirement=prompt, tasks=coord_output)
 
+        events.add("running", "Planner", "planner", f"Planning with tasks...")
         planner = Agent(client=client, name=plan_cfg['name'],
                        instructions="You are the Planner. Be concise and practical.")
         plan_result = await planner.run(plan_prompt)
         plan_output = plan_result.text if hasattr(plan_result, 'text') else str(plan_result)
+        events.add("completed", "Planner", "planner", f"Plan: {plan_output[:60]}...")
 
         workflow_steps.append({
             'step_num': step_num,
@@ -1408,19 +1475,22 @@ Provide the fixed code in a ```python``` block.'''
             'icon': plan_cfg['icon'],
             'role': plan_cfg['role'],
             'status': 'completed',
-            'input': f"Create plan for: {prompt}",
+            'input': f"Tasks from Coordinator: {coord_output[:80]}...",
             'output': plan_output[:500] + '...' if len(plan_output) > 500 else plan_output,
             'code': None
         })
+        step_stream.put(workflow_steps[-1])
         step_num += 1
 
         # Step 3: Coder
         coder_cfg = agents_config['coder']
-        coder_prompt = coder_cfg['prompt'].format(requirement=prompt)
+        coder_prompt = coder_cfg['prompt'].format(requirement=prompt, plan=plan_output)
 
+        events.add("running", "Coder", "coder", f"Writing code per plan...")
         coder = Agent(client=client, name=coder_cfg['name'],
-                     instructions="You are the Coder. Write clean, working Python code.")
+                     instructions="You are the Coder. Write clean, working Python code based on the plan.")
         coder_result = await coder.run(coder_prompt)
+        events.add("completed", "Coder", "coder", f"Generated code")
         coder_output = coder_result.text if hasattr(coder_result, 'text') else str(coder_result)
 
         # Extract code
@@ -1433,10 +1503,11 @@ Provide the fixed code in a ```python``` block.'''
             'icon': coder_cfg['icon'],
             'role': coder_cfg['role'],
             'status': 'completed',
-            'input': f"Write code for: {prompt}",
+            'input': f"Plan: {plan_output[:80]}...",
             'output': "Code generated successfully",
             'code': extracted_code
         })
+        step_stream.put(workflow_steps[-1])
         final_code = extracted_code
         step_num += 1
 
@@ -1444,9 +1515,11 @@ Provide the fixed code in a ```python``` block.'''
         lint_cfg = agents_config['linter']
         lint_prompt = lint_cfg['prompt'].format(code=extracted_code[:500] if extracted_code else "")
 
+        events.add("running", "Linter", "linter", f"Checking code style...")
         linter = Agent(client=client, name=lint_cfg['name'],
                       instructions="You are the Linter. Check for style issues.")
         lint_result = await linter.run(lint_prompt)
+        events.add("completed", "Linter", "linter", "Style check done")
         lint_output = lint_result.text if hasattr(lint_result, 'text') else str(lint_result)
 
         workflow_steps.append({
@@ -1459,15 +1532,18 @@ Provide the fixed code in a ```python``` block.'''
             'output': lint_output[:300] + '...' if len(lint_output) > 300 else lint_output,
             'code': None
         })
+        step_stream.put(workflow_steps[-1])
         step_num += 1
 
         # Step 5: Reviewer
         rev_cfg = agents_config['reviewer']
         rev_prompt = rev_cfg['prompt'].format(code=extracted_code[:500] if extracted_code else "")
 
+        events.add("running", "Reviewer", "reviewer", f"Reviewing code quality...")
         reviewer = Agent(client=client, name=rev_cfg['name'],
                         instructions="You are the Reviewer. Check code quality.")
         rev_result = await reviewer.run(rev_prompt)
+        events.add("completed", "Reviewer", "reviewer", "Review done")
         rev_output = rev_result.text if hasattr(rev_result, 'text') else str(rev_result)
 
         workflow_steps.append({
@@ -1480,15 +1556,18 @@ Provide the fixed code in a ```python``` block.'''
             'output': rev_output[:300] + '...' if len(rev_output) > 300 else rev_output,
             'code': None
         })
+        step_stream.put(workflow_steps[-1])
         step_num += 1
 
         # Step 6: Tester
         test_cfg = agents_config['tester']
         test_prompt = test_cfg['prompt'].format(code=extracted_code[:500] if extracted_code else "")
 
+        events.add("running", "Tester", "tester", f"Generating tests...")
         tester = Agent(client=client, name=test_cfg['name'],
                        instructions="You are the Tester. Generate pytest tests.")
         test_result = await tester.run(test_prompt)
+        events.add("completed", "Tester", "tester", "Tests generated")
         test_output = test_result.text if hasattr(test_result, 'text') else str(test_result)
 
         # Extract test code
@@ -1505,10 +1584,22 @@ Provide the fixed code in a ```python``` block.'''
             'output': "Tests generated for main functions" if test_code else "No testable functions found",
             'code': test_code
         })
+        step_stream.put(workflow_steps[-1])
 
         # Execute the main code
         exec_result = execute_code_safe(extracted_code)
         execution_output = exec_result.get("output") if exec_result["success"] else None
+
+        # Emit closed events for all agents
+        for agent_name, agent_role in [
+            ("Coordinator", "coordinator"), ("Planner", "planner"),
+            ("Coder", "coder"), ("Linter", "linter"),
+            ("Reviewer", "reviewer"), ("Tester", "tester"),
+        ]:
+            events.add("closed", agent_name, agent_role, "Completed")
+
+        # Signal the stream that workflow is complete
+        step_stream.mark_done(final_code, execution_output or "")
 
         return {
             'workflow_steps': workflow_steps,
@@ -1521,14 +1612,16 @@ Provide the fixed code in a ```python``` block.'''
             }
         }
 
-    try:
-        return asyncio.run(run_workflow())
-    except Exception as e:
-        return jsonify({
-            'error': str(e),
-            'workflow_steps': [],
-            'final_code': None
-        })
+    def _run_in_background():
+        try:
+            asyncio.run(run_workflow())
+        except Exception as e:
+            step_stream.mark_done("", "")
+            events.add("error", "System", "system", str(e))
+
+    thread = threading.Thread(target=_run_in_background, daemon=True)
+    thread.start()
+    return jsonify({"status": "started"})
 
 
 @app.route('/run', methods=['POST'])
@@ -1660,6 +1753,32 @@ def clear_events_api():
     """Clear all events."""
     events.clear()
     return jsonify({"success": True})
+
+
+@app.route('/api/stream/steps')
+def stream_steps():
+    """SSE stream that pushes completed workflow steps to the frontend."""
+    def generate():
+        step_stream.clear()
+        index = 0
+        done = False
+        while not done:
+            new_steps, index, done = step_stream.get_since(index, timeout=30.0)
+            for step in new_steps:
+                if step.get("_done"):
+                    yield f"data: {json.dumps({'_done': True, 'final_code': step.get('final_code', ''), 'execution_output': step.get('execution_output', '')})}\n\n"
+                else:
+                    yield f"data: {json.dumps(step)}\n\n"
+        yield "event: close\ndata: {}\n\n"
+
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+        }
+    )
 
 
 if __name__ == '__main__':

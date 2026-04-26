@@ -83,7 +83,7 @@ class WorkflowRunner:
                 "output": None,
             })
 
-            code = get_coder_agent().implement(context.requirement)
+            code = get_coder_agent().implement(context.requirement, plan=plan_text)
             self.step_logs[-1]["output"] = f"Generated {len(code.splitlines())} lines of code"
             return code
 

@@ -37,7 +37,7 @@ class CoderAgent(BaseAgent):
     def implement(
         self,
         requirement: str,
-        plan: Optional[Dict[str, Any]] = None,
+        plan: Optional[Any] = None,
     ) -> str:
         """
         Implement code based on requirement.
